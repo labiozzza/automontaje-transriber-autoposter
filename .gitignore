@@ -1,0 +1,12 @@
+instagram-media/
+__pycache__/
+montage_work/
+*.pyc
+.DS_Store
+uploads/
+montage_work/
+central_work/
+instagram-media/
+config/secrets*.json
+montage/instaposter/client_secret.json
+montage/instaposter/token.json

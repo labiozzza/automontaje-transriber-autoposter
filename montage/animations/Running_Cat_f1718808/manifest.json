@@ -1,0 +1,24 @@
+{
+  "id": "Running_Cat_f1718808",
+  "name": "Running Cat",
+  "fps": 10.0,
+  "frames": [
+    {
+      "file": "frame_0000.png"
+    },
+    {
+      "file": "frame_0001.png"
+    },
+    {
+      "file": "frame_0002.png"
+    },
+    {
+      "file": "frame_0003.png"
+    },
+    {
+      "file": "frame_0004.png"
+    }
+  ],
+  "created_at": 1784271097.2282634,
+  "updated_at": 1784271097.2282634
+}

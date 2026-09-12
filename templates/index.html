@@ -1,0 +1,2330 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0a0a0f">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+<title>Transcriber</title>
+<style>
+@font-face { font-family: 'ComfortaaPreview'; src: url('/font-assets/Comfortaa.ttf') format('truetype'); font-display: swap; }
+:root {
+  --bg: #0a0a0f;
+  --surface: #12121a;
+  --surface2: #1a1a25;
+  --border: #2a2a3a;
+  --text: #e8e8f0;
+  --text2: #8888a0;
+  --accent: #6c5ce7;
+  --accent2: #a29bfe;
+  --green: #00b894;
+  --red: #e17055;
+  --yellow: #fdcb6e;
+  --radius: 12px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+
+h1 {
+  text-align: center;
+  font-size: 28px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  background: linear-gradient(135deg, var(--accent2), var(--accent));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.subtitle { text-align: center; color: var(--text2); margin-bottom: 32px; font-size: 14px; }
+
+.view-tabs {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-bottom: 24px;
+}
+.view-tab {
+  padding: 10px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text2);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.view-tab:hover { border-color: var(--accent); color: var(--text); }
+.view-tab.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  border-color: transparent;
+}
+.view { display: none; }
+.view.active { display: block; }
+
+.montage-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; }
+.badge.ok { background: rgba(0,184,148,0.15); color: var(--green); }
+.badge.no { background: rgba(225,112,85,0.15); color: var(--red); }
+.badge.up { background: rgba(167,139,250,0.15); color: var(--accent2); }
+.montage-status-row {
+  display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center;
+  font-size: 13px; color: var(--text2); margin-bottom: 8px;
+}
+.montage-status-row .badge { margin-right: 4px; }
+.target-row {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 10px; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; margin-bottom: 8px;
+}
+.target-row input[type="text"], .target-row textarea { flex: 1; min-width: 180px; }
+.publish-results { margin-top: 12px; }
+.publish-results .badge { margin-right: 6px; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  margin-bottom: 16px;
+}
+
+.card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 16px;
+}
+
+/* Upload zone */
+.upload-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+}
+.upload-zone:hover, .upload-zone.dragover {
+  border-color: var(--accent);
+  background: rgba(108, 92, 231, 0.05);
+}
+.upload-zone.has-file {
+  border-color: var(--green);
+  border-style: solid;
+}
+
+.upload-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
+.upload-text { color: var(--text2); font-size: 14px; }
+.upload-filename {
+  color: var(--green);
+  font-weight: 600;
+  font-size: 16px;
+  margin-top: 8px;
+}
+.upload-input { display: none; }
+
+/* Settings grid */
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.setting-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text2);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+select, input[type="number"] {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+select:focus, input:focus {
+  border-color: var(--accent);
+}
+
+select option { background: var(--surface2); }
+
+/* Toggle */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.toggle-row:last-child { border-bottom: none; }
+
+.toggle-label { font-size: 14px; }
+.toggle-desc { font-size: 12px; color: var(--text2); }
+
+.toggle {
+  position: relative;
+  width: 48px;
+  height: 26px;
+  cursor: pointer;
+}
+
+.toggle input { display: none; }
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  transition: all 0.2s;
+}
+
+.toggle-slider::after {
+  content: '';
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--text2);
+  top: 2px;
+  left: 2px;
+  transition: all 0.2s;
+}
+
+.toggle input:checked + .toggle-slider {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.toggle input:checked + .toggle-slider::after {
+  transform: translateX(22px);
+  background: white;
+}
+
+/* Speaker count */
+.speaker-count-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.speaker-count-row input[type="number"] {
+  width: 80px;
+  text-align: center;
+}
+
+/* Button */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 24px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  width: 100%;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: white;
+}
+
+.btn-primary:hover { background: var(--accent2); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-sm {
+  padding: 8px 16px;
+  font-size: 12px;
+  width: auto;
+}
+
+/* Progress */
+.progress-container { display: none; }
+.progress-container.active { display: block; }
+
+.progress-bar-wrapper {
+  background: var(--surface2);
+  border-radius: 8px;
+  height: 8px;
+  overflow: hidden;
+  margin: 12px 0;
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  border-radius: 8px;
+  transition: width 0.3s ease;
+  width: 0%;
+}
+
+.progress-stage {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.progress-detail {
+  font-size: 12px;
+  color: var(--text2);
+}
+
+.progress-percent {
+  font-size: 12px;
+  color: var(--accent2);
+  float: right;
+}
+
+/* Stage icons */
+.stage-icon { margin-right: 6px; }
+
+/* Results */
+.results-container { display: none; }
+.results-container.active { display: block; }
+
+.result-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  background: var(--surface2);
+  border-radius: 8px;
+  padding: 4px;
+}
+
+.result-tab {
+  flex: 1;
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  color: var(--text2);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.result-tab.active {
+  background: var(--accent);
+  color: white;
+}
+
+.result-display {
+  background: var(--surface2);
+  border-radius: 8px;
+  padding: 20px;
+  max-height: 500px;
+  overflow-y: auto;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.result-display::-webkit-scrollbar { width: 6px; }
+.result-display::-webkit-scrollbar-track { background: transparent; }
+.result-display::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.speaker-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  margin-right: 6px;
+  text-transform: uppercase;
+}
+
+.speaker-0 { background: rgba(108, 92, 231, 0.2); color: var(--accent2); }
+.speaker-1 { background: rgba(0, 184, 148, 0.2); color: var(--green); }
+.speaker-2 { background: rgba(225, 112, 85, 0.2); color: var(--red); }
+.speaker-3 { background: rgba(253, 203, 110, 0.2); color: var(--yellow); }
+.speaker-4 { background: rgba(162, 155, 254, 0.2); color: #a29bfe; }
+.speaker-5 { background: rgba(85, 239, 196, 0.2); color: #55efc4; }
+
+.timecode {
+  color: var(--text2);
+  font-size: 11px;
+  margin-right: 8px;
+  user-select: none;
+}
+
+.dialogue-separator {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
+/* Export buttons */
+.export-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.export-btn {
+  padding: 8px 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-weight: 500;
+}
+
+.export-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent2);
+}
+
+/* Video stage (phone preview) */
+.video-stage {
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+  aspect-ratio: 9 / 16;
+  background: #050607;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 0 auto 12px;
+}
+.video-stage video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #050607;
+  object-fit: contain;
+}
+
+/* CapCut-style subtitle overlay on the preview */
+.sub-drag-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+.sub-drag-layer .sub-card {
+  position: absolute;
+  left: 50%;
+  top: 78%;
+  transform: translate(-50%, -50%);
+  max-width: 76%;
+  padding: 10px 18px;
+  border-radius: 20px;
+  background: rgba(0, 0, 0, 0.53);
+  box-shadow: 0 0 0 1px rgba(255,255,255,.12);
+  color: #fff;
+  text-align: center;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+  will-change: transform, font-size;
+}
+.sub-drag-layer .sub-card.no-box { background: transparent; box-shadow: none; padding: 0; }
+.sub-drag-layer .sub-card:active {
+  cursor: grabbing;
+  box-shadow: 0 0 0 3px rgba(0,230,118,.55), 0 0 0 1px rgba(255,255,255,.2);
+}
+.sub-drag-layer .sub-card.roaming {
+  box-shadow: 0 0 0 3px rgba(0,230,118,.55), 0 0 0 1px rgba(255,255,255,.2);
+}
+.sub-drag-layer .sub-card-text {
+  display: block;
+  font-size: calc(18px * var(--sub-scale, 1));
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: .2px;
+  text-shadow: 0 1px 2px rgba(0,0,0,.6);
+  -webkit-text-stroke: 1px rgba(0,0,0,.85);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.sub-drag-layer .sub-card-hint {
+  display: block;
+  font-size: 10px;
+  color: rgba(255,255,255,.55);
+  letter-spacing: .4px;
+  text-transform: uppercase;
+}
+.sub-drag-tip {
+  position: absolute;
+  left: 50%;
+  top: 4%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  color: #fff;
+  background: rgba(0,0,0,.45);
+  padding: 3px 10px;
+  border-radius: 12px;
+  letter-spacing: .3px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* Keybar (zoom / segment timeline) */
+.keybar {
+  position: relative;
+  height: 42px;
+  margin: 8px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface2);
+  overflow: hidden;
+  cursor: pointer;
+}
+.keybar-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+  transform: translateX(-1px);
+  pointer-events: none;
+  transition: left 0.12s linear;
+}
+.keybar-marker {
+  position: absolute;
+  top: 5px;
+  width: 9px;
+  height: 30px;
+  border-radius: 5px;
+  transform: translateX(-4px);
+  background: var(--yellow);
+  border: 1px solid #3a2f13;
+  pointer-events: none;
+}
+.keybar-marker.word { background: var(--accent2); border-color: #2a2050; }
+.keybar-marker.active { background: var(--accent); border-color: #1d5b4e; }
+.keybar-marker.anim { background: #FFD54F; border-color: #755c00; }
+.timeline-animation-preview {
+  display: none;
+  position: absolute;
+  left: 10%;
+  right: 10%;
+  bottom: 8px;
+  height: 48px;
+  pointer-events: none;
+  z-index: 5;
+}
+.timeline-animation-preview.active { display: block; }
+.timeline-animation-preview::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 6px;
+  border-radius: 4px;
+  background: rgba(255,255,255,.65);
+}
+.timeline-animation-item {
+  position: absolute;
+  left: 0;
+  bottom: 4px;
+  width: 36px;
+  height: auto;
+  transform: translateX(-50%);
+}
+.timeline-animation-fill { position:absolute;left:0;bottom:0;height:6px;border-radius:4px;background:rgba(255,255,255,.9);width:0; }
+.animation-frame-list { display:flex; gap:10px; flex-wrap:wrap; min-height:96px; padding:12px; border:1px dashed var(--border); border-radius:10px; }
+.animation-frame { width:82px; padding:6px; border:1px solid var(--border); border-radius:8px; background:var(--surface2); cursor:grab; text-align:center; }
+.animation-frame img { width:68px; height:68px; object-fit:contain; display:block; }
+.animation-frame.dragging { opacity:.35; }
+.timebar-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text2);
+  margin-bottom: 8px;
+  font-family: ui-monospace, monospace;
+}
+
+/* Project row */
+.project-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+}
+.project-row.selected {
+  border-color: var(--accent);
+  background: var(--surface2);
+}
+.project-row .actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.project-row .meta {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Use-in-montage CTA */
+.cta-btn {
+  width: 100%;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.cta-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Error */
+.error-box {
+  background: rgba(225, 112, 85, 0.1);
+  border: 1px solid rgba(225, 112, 85, 0.3);
+  border-radius: 8px;
+  padding: 16px;
+  color: var(--red);
+  font-size: 13px;
+  display: none;
+}
+.error-box.active { display: block; }
+
+/* API info */
+.api-info { font-size: 12px; color: var(--text2); margin-top: 8px; }
+.api-info code {
+  background: var(--surface2);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 11px;
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+  .settings-grid { grid-template-columns: 1fr; }
+  .export-bar { flex-direction: column; }
+  .export-btn { width: 100%; text-align: center; }
+
+  .project-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .project-row .actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .project-row .actions .btn { flex: 1; }
+  .card { padding: 16px; }
+  .video-stage { max-width: 340px; }
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>Transcriber</h1>
+  <p class="subtitle">Транскрибация и автомонтаж вертикальных роликов</p>
+
+  <div class="view-tabs">
+    <button class="view-tab active" data-view="transcribe" onclick="switchView('transcribe')">Транскрибация</button>
+    <button class="view-tab" data-view="montage" onclick="switchView('montage')">Автомонтаж</button>
+    <button class="view-tab" data-view="animations" onclick="switchView('animations')">Анимации</button>
+  </div>
+
+  <!-- ======== ТАБ 1: ТРАНСКРИБАЦИЯ ======== -->
+  <div id="viewTranscribe" class="view active">
+
+  <!-- Upload -->
+  <div class="card">
+    <div class="card-title">Файл</div>
+    <div class="upload-zone" id="uploadZone">
+      <input type="file" id="fileInput" accept="audio/*,video/*,.mp3,.mp4,.wav,.ogg,.flac,.m4a,.mkv,.avi,.webm">
+      <div class="upload-icon">📁</div>
+      <div class="upload-text">Перетащите файл сюда или нажмите для выбора</div>
+      <div class="upload-filename" id="fileName"></div>
+    </div>
+    <div class="api-info" id="apiInfo" style="display:none">
+      API: <code>POST /api/upload</code> → <code>POST /api/transcribe/{job_id}</code> → <code>GET /api/result/{job_id}</code>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div class="card" id="settingsCard" style="display:none">
+    <div class="card-title">Настройки</div>
+    <div class="settings-grid">
+      <div class="setting-group">
+        <label>Модель Whisper</label>
+        <select id="modelSelect">
+          <option value="tiny">tiny (быстро, ~1GB RAM)</option>
+          <option value="base">base (нормально, ~1GB RAM)</option>
+          <option value="small" selected>small (хорошо, ~2GB RAM)</option>
+          <option value="medium">medium (отлично, ~5GB RAM)</option>
+        </select>
+      </div>
+      <div class="setting-group">
+        <label>Язык</label>
+        <select id="languageSelect">
+          <option value="ru" selected>Русский</option>
+          <option value="en">English</option>
+          <option value="auto">Авто-определение</option>
+          <option value="uk">Українська</option>
+          <option value="de">Deutsch</option>
+          <option value="fr">Français</option>
+          <option value="es">Español</option>
+          <option value="zh">中文</option>
+          <option value="ja">日本語</option>
+        </select>
+      </div>
+      <div class="setting-group">
+        <label>Режим транскрибации</label>
+        <select id="modeSelect">
+          <option value="sentences" selected>По предложениям</option>
+          <option value="words">По словам</option>
+        </select>
+      </div>
+      <div class="setting-group">
+        <label>&nbsp;</label>
+        <button class="btn btn-primary" id="startBtn" disabled onclick="startTranscription()">
+          Начать транскрибацию
+        </button>
+      </div>
+    </div>
+
+    <!-- Toggles -->
+    <div style="margin-top: 16px;">
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-label">Диаризация</div>
+          <div class="toggle-desc">Определение спикеров (кто говорит)</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="diarizationToggle" onchange="toggleDiarization()">
+          <div class="toggle-slider"></div>
+        </label>
+      </div>
+
+      <div id="speakerCountRow" style="display:none">
+        <div class="speaker-count-row">
+          <span class="toggle-label">Количество спикеров:</span>
+          <input type="number" id="numSpeakers" min="2" max="20" value="2" placeholder="авто">
+          <span class="toggle-desc">(оставьте пустым для авто-определения)</span>
+        </div>
+      </div>
+
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-label">Показывать тайм-коды</div>
+          <div class="toggle-desc">Отображать временные метки рядом с текстом</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="showTimecodes" checked onchange="refreshDisplay()">
+          <div class="toggle-slider"></div>
+        </label>
+      </div>
+
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-label">Показывать спикеров</div>
+          <div class="toggle-desc">Отображать имена спикеров в тексте</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="showSpeakers" checked onchange="refreshDisplay()">
+          <div class="toggle-slider"></div>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Progress -->
+  <div class="card progress-container" id="progressCard">
+    <div class="card-title">Прогресс</div>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div class="progress-stage" id="progressStage">Подготовка...</div>
+      <span class="progress-percent" id="progressPercent">0%</span>
+    </div>
+    <div class="progress-bar-wrapper">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+    <div class="progress-detail" id="progressDetail"></div>
+  </div>
+
+  <!-- Error -->
+  <div class="error-box" id="errorBox"></div>
+
+  <!-- Results -->
+  <div class="results-container" id="resultsCard">
+    <div class="card">
+      <div class="card-title">Результат</div>
+
+      <div class="result-tabs">
+        <button class="result-tab active" onclick="switchTab('dialogue', this)">Диалог</button>
+        <button class="result-tab" onclick="switchTab('text', this)">Текст</button>
+        <button class="result-tab" onclick="switchTab('json', this)">JSON</button>
+      </div>
+
+      <div class="result-display" id="resultDisplay"></div>
+
+      <div class="export-bar">
+        <button class="export-btn" onclick="download('srt')">⬇ SRT</button>
+        <button class="export-btn" onclick="download('vtt')">⬇ VTT</button>
+        <button class="export-btn" onclick="download('txt')">⬇ TXT</button>
+        <button class="export-btn" onclick="download('json')">⬇ JSON</button>
+        <button class="export-btn" onclick="download('tsv')">⬇ TSV</button>
+        <button class="export-btn" onclick="download('dialogue')">⬇ Диалог</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Video preview -->
+  <div class="results-container" id="transcribePreviewCard">
+    <div class="card">
+      <div class="card-title">Превью видео</div>
+      <div class="video-stage">
+        <video id="transcribePreviewVideo" playsinline controls preload="metadata"></video>
+      </div>
+      <div class="timebar-scale">
+        <span id="trPreviewCur">00:00.000</span>
+        <span id="trPreviewDur">00:00.000</span>
+      </div>
+      <div class="keybar" id="trPreviewKeybar">
+        <div id="trPreviewMarkers"></div>
+        <div id="trPreviewPlayhead" class="keybar-playhead"></div>
+      </div>
+      <button class="cta-btn" id="useInMontageBtn" disabled onclick="useInMontage()">Использовать в монтаже</button>
+      <div id="trPreviewHint" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
+    </div>
+  </div>
+  </div> <!-- /viewTranscribe -->
+
+  <!-- ======== ТАБ 2: АВТОМОНТАЖ ======== -->
+  <div id="viewMontage" class="view">
+
+    <!-- Status -->
+    <div class="card">
+      <div class="card-title">Система</div>
+      <div class="montage-status-row" id="montageStatusRow">Проверка...</div>
+      <div id="montageStatusDetail" style="font-size:13px;color:var(--text2)"></div>
+    </div>
+
+    <!-- Projects -->
+    <div class="card">
+      <div class="card-title">Проекты <span id="projectsCount" style="color:var(--text2)"></span></div>
+      <div id="projectsList" style="display:flex;flex-direction:column;gap:8px"></div>
+      <div style="margin-top:10px;font-size:12px;color:var(--text2)">
+        Проект создаётся автоматически после транскрибации загруженного видео. Выберите его, чтобы смонтировать без повторной загрузки файла.
+      </div>
+    </div>
+
+    <!-- Project preview -->
+    <div class="results-container" id="projectPreviewCard">
+      <div class="card">
+        <div class="card-title">Превью проекта
+          <span style="margin-left:6px;font-size:12px;color:var(--text2)">тяните субтитры пальцем — двигайте и масштабируйте</span>
+        </div>
+        <div class="video-stage">
+          <video id="projectPreviewVideo" playsinline controls preload="metadata"></video>
+          <div class="timeline-animation-preview" id="timelineAnimationPreview"><div class="timeline-animation-fill"></div><img class="timeline-animation-item" alt="Кадр анимации"></div>
+          <div class="sub-drag-layer">
+            <div class="sub-drag-tip">X <span id="projectPreviewSubX">0.50</span> • Y <span id="projectPreviewSubY">0.78</span> • Размер <span id="projectPreviewSubScale">1.00</span></div>
+            <div class="sub-card" id="projectPreviewSubCard"><span class="sub-card-text" id="projectPreviewSubText"></span></div>
+          </div>
+        </div>
+        <div class="timebar-scale">
+          <span id="projectPreviewCur">00:00.000</span>
+          <span id="projectPreviewDur">00:00.000</span>
+        </div>
+        <div class="keybar" id="projectPreviewKeybar">
+          <div id="projectPreviewMarkers"></div>
+          <div id="projectPreviewPlayhead" class="keybar-playhead"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Input -->
+    <div class="card">
+      <div class="card-title">Исходное видео и текст</div>
+      <div class="upload-zone" id="montageUploadZone">
+        <input type="file" id="montageFileInput" accept="video/*,.mp4,.mov,.mkv,.webm">
+        <div class="upload-icon">🎬</div>
+        <div class="upload-text">Видео (9:16) — перетащите или нажмите</div>
+        <div class="upload-filename" id="montageFileName"></div>
+      </div>
+      <div id="montageProjectSel" style="margin-top:10px;font-size:13px;color:var(--accent2);display:none">
+        Выбран проект: <b id="montageProjectName"></b>
+        <a href="javascript:void(0)" onclick="clearProject()" style="margin-left:8px;color:var(--text2)">✕ отменить</a>
+      </div>
+      <div style="margin-top:12px">
+        <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">
+          Текст: готовый SRT <em style="text-transform:none">(необязательно)</em>
+        </label>
+        <input type="file" id="montageSrtInput" accept=".srt,.txt" style="color:var(--text2)">
+      </div>
+      <div class="toggle-row" style="margin-top:12px">
+        <div>
+          <div class="toggle-label">Использовать транскрибацию</div>
+          <div class="toggle-desc" id="montageTranscriptInfo">Сначала транскрибируйте аудио на вкладке «Транскрибация»</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="montageUseTranscript" checked>
+          <div class="toggle-slider"></div>
+        </label>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="card">
+      <div class="card-title">Настройки монтажа</div>
+      <div class="montage-grid">
+        <div class="setting-group">
+          <label>Субтитры</label>
+          <select id="montageSubtitleMode">
+            <option value="sentences">По предложениям</option>
+            <option value="words" selected>По словам</option>
+          </select>
+        </div>
+        <div class="setting-group">
+          <label>Режим краёв при зуме</label>
+          <select id="montageEdgeMode">
+            <option value="reflect">Отражение</option>
+            <option value="scale" selected>Масштаб</option>
+          </select>
+        </div>
+        <div class="setting-group">
+          <label>&nbsp;</label>
+          <button class="btn btn-primary" id="montageStartBtn" disabled onclick="startMontage()">Запустить монтаж</button>
+        </div>
+      </div>
+
+      <div style="margin-top:16px">
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Отслеживание лица</div>
+            <div class="toggle-desc">MediaPipe — анализ глаз для автозума</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="montageFaceTrack">
+            <div class="toggle-slider"></div>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Фон-плашка за буквами</div>
+            <div class="toggle-desc">Выключите, чтобы оставить только буквы и обводку</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="montageSubtitleBox" onchange="updateSubtitlePreviewStyle()">
+            <div class="toggle-slider"></div>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Автозум</div>
+            <div class="toggle-desc">Умный зум по смыслу текста</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="montageAutozoom">
+            <div class="toggle-slider"></div>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Умная подсветка (BigPickle)</div>
+            <div class="toggle-desc" id="montageBigpickleDesc">Цвета слов по смыслу, нужен интернет</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="montageBigpickle" checked>
+            <div class="toggle-slider"></div>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Advanced -->
+    <div class="card">
+      <div class="card-title">Дополнительно: таймлайн и анимация</div>
+      <div class="montage-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+        <div class="setting-group">
+          <label>Позиция субтитров</label>
+          <select id="montageSubtitlePosition">
+            <option value="custom" selected>Своя (перетаскиванием)</option>
+            <option value="bottom">Внизу</option>
+            <option value="center">По центру</option>
+            <option value="top">Вверху</option>
+          </select>
+          <input type="hidden" id="montageSubtitleX" value="0.50">
+          <input type="hidden" id="montageSubtitleY" value="0.78">
+          <input type="hidden" id="montageSubtitleScale" value="1.00">
+        </div>
+        <div class="setting-group">
+          <label>Шрифт субтитров</label>
+          <select id="montageSubtitleFont" onchange="updateSubtitlePreviewStyle()">
+            <option value="/Users/labiozzza/Documents/Default Project/transcriber/montage/fonts/Comfortaa.ttf">Comfortaa (встроен)</option>
+            <option value="/System/Library/Fonts/Helvetica.ttc">Системный (Helvetica)</option>
+          </select>
+        </div>
+        <div class="setting-group">
+          <label>Анимация прогресса (таймлайн)</label>
+          <select id="montageAnimationId" onchange="updateAnimationPreview()">
+            <option value="">Без анимации</option>
+          </select>
+        </div>
+        <div class="setting-group">
+          <label>Появляется через, сек</label>
+          <input type="number" id="montageAnimationStart" value="0" min="0" step="0.1" oninput="updateAnimationPreview()">
+        </div>
+        <div class="setting-group">
+          <label>Смещение по X, px</label>
+          <input type="number" id="montageAnimationOffset" value="0" min="-200" max="200">
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Переопределить таймлайн автозума</div>
+            <div class="toggle-desc">JSON-список [{&quot;time&quot;: 0, &quot;percent&quot;: 0}, ...]; заменит умный таймлайн</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="montageZoomOverride" onclick="document.getElementById('montageZoomTimeline').style.display=this.checked?'block':'none'">
+            <div class="toggle-slider"></div>
+          </label>
+        </div>
+        <textarea id="montageZoomTimeline" rows="4" placeholder='[{"time": 0, "percent": 0}, {"time": 2, "percent": 45}, {"time": 5, "percent": 10}]' style="display:none;width:100%;margin-top:10px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-family:ui-monospace,monospace;resize:vertical"></textarea>
+      </div>
+    </div>
+
+    <!-- Montage progress -->
+    <div class="card progress-container active" id="montageProgressCard">
+      <div class="card-title">Прогресс монтажа</div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div class="progress-stage" id="montageProgressStage">Ожидание...</div>
+        <span class="progress-percent" id="montageProgressPercent">0%</span>
+      </div>
+      <div class="progress-bar-wrapper">
+        <div class="progress-bar" id="montageProgressBar"></div>
+      </div>
+      <div class="progress-detail" id="montageProgressDetail"></div>
+      <div class="progress-detail" id="montageLog" style="max-height:140px;overflow:auto;white-space:pre-wrap;font-size:12px"></div>
+    </div>
+
+    <!-- Montage error -->
+    <div class="error-box" id="montageErrorBox"></div>
+
+    <!-- Montage result + publish -->
+    <div class="results-container" id="montageResultsCard">
+      <div class="card">
+        <div class="card-title">Готовый ролик</div>
+        <div class="montage-status-row">
+          <span id="montageResultInfo"></span>
+        </div>
+<div class="video-stage" id="montageVideoStage" style="display:none">
+          <video id="montageVideo" playsinline controls preload="metadata"></video>
+          <div class="sub-drag-layer">
+            <div class="sub-drag-tip">Субтитры запечены в ролик. Чтобы изменить позицию/размер — вернитесь на превью проекта.</div>
+          </div>
+        </div>
+        </div>
+        <div class="timebar-scale" id="montageVideoTimebar" style="display:none">
+          <span id="montageVideoCur">00:00.000</span>
+          <span id="montageVideoDur">00:00.000</span>
+        </div>
+        <div class="keybar" id="montageVideoKeybar" style="display:none">
+          <div id="montageVideoMarkers"></div>
+          <div id="montageVideoPlayhead" class="keybar-playhead"></div>
+        </div>
+        <div class="export-bar">
+          <button class="export-btn" id="shareMontageBtn" onclick="shareMontage()">Поделиться / сохранить в галерею</button>
+        </div>
+
+        <div class="card-title" style="margin-top:20px">Таймлайн ролика</div>
+        <div id="montageTimelineInfo" style="font-size:13px;color:var(--text2)"></div>
+
+        <div class="card-title" style="margin-top:20px">Публикация</div>
+        <div class="target-row">
+          <label><input type="checkbox" class="tg-target" value="instagram" checked> Instagram Reel</label>
+          <label><input type="checkbox" class="tg-target" value="trial"> Instagram Trial</label>
+          <label><input type="checkbox" class="tg-target" value="youtube"> YouTube Shorts</label>
+          <label><input type="checkbox" class="tg-target" value="threads"> Threads</label>
+          <label><input type="checkbox" class="tg-target" value="telegram"> Telegram</label>
+        </div>
+        <div class="setting-group" style="margin-bottom:10px">
+          <label>Подпись / заголовок</label>
+          <textarea id="montageCaption" rows="2" style="width:100%;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px;resize:vertical"></textarea>
+        </div>
+        <button class="btn btn-primary" id="montagePublishBtn" disabled onclick="publishMontage()">Опубликовать</button>
+        <div class="publish-results" id="montagePublishResults"></div>
+      </div>
+    </div>
+  </div> <!-- /viewMontage -->
+
+  <div id="viewAnimations" class="view">
+    <div class="card">
+      <div class="card-title">Создание анимации</div>
+      <div class="montage-grid">
+        <div class="setting-group"><label>Название</label><input id="animationBuilderName" value="Новая анимация"></div>
+        <div class="setting-group"><label>Кадров в секунду</label><input id="animationBuilderFps" type="number" value="10" min="1" max="60"></div>
+        <div class="setting-group"><label>Кадры PNG/JPG/WebP</label><input id="animationBuilderInput" type="file" accept="image/*" multiple></div>
+      </div>
+      <p class="toggle-desc">Перетаскивайте карточки кадров, чтобы изменить их порядок.</p>
+      <div class="animation-frame-list" id="animationFrameList"></div>
+      <button class="btn btn-primary" id="animationBuilderSave" onclick="saveAnimation()" style="margin-top:14px">Сохранить анимацию</button>
+      <div id="animationBuilderStatus" class="progress-detail" style="margin-top:10px"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+let jobId = null;
+let ws = null;
+let segments = [];
+let transcribeIsVideo = false;
+let transcribeJobForProject = null;
+let currentTab = 'dialogue';
+
+const SPEAKER_COLORS = ['speaker-0','speaker-1','speaker-2','speaker-3','speaker-4','speaker-5'];
+
+// Upload
+const uploadZone = document.getElementById('uploadZone');
+const fileInput = document.getElementById('fileInput');
+
+uploadZone.addEventListener('click', () => fileInput.click());
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files.length) handleFile(fileInput.files[0]); });
+
+async function handleFile(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  document.getElementById('fileName').textContent = file.name;
+  uploadZone.classList.add('has-file');
+  document.getElementById('apiInfo').style.display = 'block';
+  document.getElementById('progressCard').classList.add('active');
+  updateProgress(0, 'upload', `Подготовка загрузки ${file.name}`);
+
+  try {
+    const data = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/upload');
+      xhr.upload.onprogress = event => {
+        if (!event.lengthComputable) return;
+        const pct = Math.min(99, event.loaded / event.total * 100);
+        updateProgress(pct, 'upload', `Загрузка: ${(event.loaded / 1048576).toFixed(1)} / ${(event.total / 1048576).toFixed(1)} МБ`);
+      };
+      xhr.onerror = () => reject(new Error('Сеть недоступна'));
+      xhr.onload = () => {
+        let payload = {};
+        try { payload = JSON.parse(xhr.responseText); } catch (_) {}
+        if (xhr.status >= 200 && xhr.status < 300) resolve(payload);
+        else reject(new Error(payload.detail || `HTTP ${xhr.status}`));
+      };
+      xhr.send(formData);
+    });
+    jobId = data.job_id;
+    transcribeJobForProject = jobId;
+    updateProgress(100, 'upload', 'Видео загружено. Выберите настройки и запустите транскрибацию.');
+    document.getElementById('settingsCard').style.display = 'block';
+    document.getElementById('startBtn').disabled = false;
+
+    transcribeIsVideo = /\.(mp4|mov|mkv|webm|avi|m4v|flv|3gp|ts)$/i.test(file.name);
+    const previewCard = document.getElementById('transcribePreviewCard');
+    if (transcribeIsVideo) {
+      previewCard.classList.add('active');
+      const v = document.getElementById('transcribePreviewVideo');
+      v.src = `/api/video/${jobId}?t=${Date.now()}`;
+      v.poster = `/api/thumb/${jobId}?t=${Date.now()}`;
+      document.getElementById('useInMontageBtn').disabled = true;
+      document.getElementById('useInMontageBtn').textContent = 'Использовать в монтаже';
+      document.getElementById('trPreviewHint').textContent =
+        'Превью доступно ещё во время транскрибации. Кнопка активируется по готовности текста.';
+    } else {
+      previewCard.classList.remove('active');
+    }
+  } catch(e) {
+    showError('Ошибка загрузки: ' + e.message);
+  }
+}
+
+function toggleDiarization() {
+  const checked = document.getElementById('diarizationToggle').checked;
+  document.getElementById('speakerCountRow').style.display = checked ? 'block' : 'none';
+}
+
+async function startTranscription() {
+  if (!jobId) return;
+
+  const form = new FormData();
+  form.append('model', document.getElementById('modelSelect').value);
+  form.append('language', document.getElementById('languageSelect').value);
+  form.append('mode', document.getElementById('modeSelect').value);
+  form.append('diarization', document.getElementById('diarizationToggle').checked);
+
+  const numSpeakers = document.getElementById('numSpeakers').value;
+  if (numSpeakers && document.getElementById('diarizationToggle').checked) {
+    form.append('num_speakers', parseInt(numSpeakers));
+  }
+
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('progressCard').classList.add('active');
+  document.getElementById('resultsCard').classList.remove('active');
+  document.getElementById('errorBox').classList.remove('active');
+  updateProgress(0, 'conversion', 'Запуск обработки...');
+
+  // Connect WebSocket
+  ws = new WebSocket(`ws://${location.host}/ws/${jobId}`);
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'progress') {
+      updateProgress(msg.progress, msg.stage, msg.detail);
+    }
+  };
+  ws.onclose = () => startTranscriptionPolling();
+
+  try {
+    await fetch(`/api/transcribe/${jobId}`, { method: 'POST', body: form });
+  } catch(e) {
+    showError('Ошибка запуска: ' + e.message);
+  }
+}
+
+let transcribePollTimer = null;
+function startTranscriptionPolling() {
+  if (transcribePollTimer || !jobId) return;
+  transcribePollTimer = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/status/${jobId}`, {cache: 'no-store'});
+      if (!res.ok) return;
+      const data = await res.json();
+      updateProgress(data.progress, data.stage, data.detail);
+      if (data.status === 'done' || data.status === 'error') {
+        clearInterval(transcribePollTimer);
+        transcribePollTimer = null;
+      }
+    } catch (_) {}
+  }, 1000);
+}
+
+function updateProgress(progress, stage, detail) {
+  const pct = Math.max(0, Math.min(100, Number(progress) || 0));
+  document.getElementById('progressBar').style.width = pct + '%';
+  document.getElementById('progressPercent').textContent = pct.toFixed(1) + '%';
+
+  const stageIcons = {
+    upload: '⬆', conversion: '🔄', transcription: '🎙', diarization: '👥', merge: '🔗', done: '✅', error: '❌'
+  };
+
+  const stageNames = {
+    upload: 'Загрузка', conversion: 'Конвертация',
+    transcription: 'Транскрибация',
+    diarization: 'Диаризация',
+    merge: 'Объединение',
+    done: 'Готово',
+    error: 'Ошибка'
+  };
+
+  document.getElementById('progressStage').innerHTML =
+    `<span class="stage-icon">${stageIcons[stage] || ''}</span>${stageNames[stage] || stage}`;
+  document.getElementById('progressDetail').textContent = detail;
+
+  if (stage === 'done') {
+    setTimeout(loadResult, 500);
+  }
+  if (stage === 'error') {
+    showError(detail);
+  }
+}
+
+async function loadResult() {
+  try {
+    const res = await fetch(`/api/result/${jobId}`);
+    const data = await res.json();
+    segments = data.segments;
+    transcriptJobId = jobId;
+    document.getElementById('resultsCard').classList.add('active');
+    document.getElementById('montageTranscriptInfo').textContent = `Использовать транскрибацию: ${data.segments.length} сегментов`;
+    setupTranscribePreview();
+    refreshProjects();
+    refreshDisplay();
+  } catch(e) {
+    showError('Ошибка загрузки результата: ' + e.message);
+  }
+}
+
+function refreshDisplay() {
+  if (!segments.length) return;
+  const display = document.getElementById('resultDisplay');
+  const showTC = document.getElementById('showTimecodes').checked;
+  const showSP = document.getElementById('showSpeakers').checked;
+
+  if (currentTab === 'dialogue') {
+    display.innerHTML = renderDialogue(segments, showTC, showSP);
+  } else if (currentTab === 'text') {
+    display.innerHTML = renderPlainText(segments, showSP);
+  } else {
+    display.innerHTML = renderJSON(segments, showTC, showSP);
+  }
+}
+
+function renderDialogue(segs, showTC, showSP) {
+  let html = '';
+  let lastSpeaker = null;
+
+  for (const seg of segs) {
+    const sp = seg.speaker;
+    if (showSP && sp && sp !== lastSpeaker) {
+      lastSpeaker = sp;
+      html += `<hr class="dialogue-separator">`;
+      html += `<div style="margin-top:8px"><strong>${speakerTag(sp)}</strong></div>`;
+    }
+
+    let line = '';
+    if (showTC) line += `<span class="timecode">[${fmtTime(seg.start)}]</span>`;
+    line += escapeHtml(seg.text);
+
+    html += `<div style="margin-left:${showTC ? '72px' : '0'};margin-bottom:4px">${line}</div>`;
+  }
+
+  return html || '<span style="color:var(--text2)">Нет данных</span>';
+}
+
+function renderPlainText(segs, showSP) {
+  let html = '';
+  for (const seg of segs) {
+    let line = '';
+    if (showSP && seg.speaker) line += `${speakerTag(seg.speaker)} `;
+    line += escapeHtml(seg.text);
+    html += `<div style="margin-bottom:4px">${line}</div>`;
+  }
+  return html || '<span style="color:var(--text2)">Нет данных</span>';
+}
+
+function renderJSON(segs, showTC, showSP) {
+  const data = segs.map(s => {
+    const e = { text: s.text };
+    if (showSP && s.speaker) e.speaker = s.speaker;
+    if (showTC) { e.start = s.start; e.end = s.end; }
+    return e;
+  });
+  return `<pre style="color:var(--text2)">${escapeHtml(JSON.stringify(data, null, 2))}</pre>`;
+}
+
+function fmtTime(t) {
+  const h = Math.floor(t/3600);
+  const m = Math.floor((t%3600)/60);
+  const s = Math.floor(t%60);
+  const ms = Math.floor((t - Math.floor(t)) * 1000);
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')},${String(ms).padStart(3,'0')}`;
+}
+
+function speakerTag(sp) {
+  if (!sp) return '';
+  const num = parseInt(sp.replace('SPEAKER_', '')) % SPEAKER_COLORS.length;
+  return `<span class="speaker-tag ${SPEAKER_COLORS[num]}">${sp}</span>`;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function switchTab(tab, btn) {
+  currentTab = tab;
+  document.querySelectorAll('.result-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  refreshDisplay();
+}
+
+function download(format) {
+  if (!jobId) return;
+  const showSP = document.getElementById('showSpeakers').checked;
+  const showTC = document.getElementById('showTimecodes').checked;
+  window.location.href = `/api/export/${jobId}/${format}?speakers=${showSP}&timecodes=${showTC}`;
+}
+
+function showError(msg) {
+  const box = document.getElementById('errorBox');
+  box.textContent = msg;
+  box.classList.add('active');
+}
+
+// ========== АВТОМОНТАЖ ==========
+let montageJobId = localStorage.getItem('montageJobId');
+let transcriptJobId = null;
+let montageWs = null;
+let projects = [];
+let selectedProjectId = null;
+
+function switchView(name) {
+  document.querySelectorAll('.view-tab').forEach(b => b.classList.toggle('active', b.dataset.view === name));
+  document.getElementById('viewTranscribe').classList.toggle('active', name === 'transcribe');
+  document.getElementById('viewMontage').classList.toggle('active', name === 'montage');
+  document.getElementById('viewAnimations').classList.toggle('active', name === 'animations');
+  if (name === 'montage') {
+    refreshMontageStatus();
+    refreshProjects();
+  }
+}
+
+function montageError(msg) {
+  const box = document.getElementById('montageErrorBox');
+  box.textContent = msg;
+  box.classList.add('active');
+}
+
+const montageUploadZone = document.getElementById('montageUploadZone');
+const montageFileInput = document.getElementById('montageFileInput');
+montageUploadZone.addEventListener('click', () => montageFileInput.click());
+montageUploadZone.addEventListener('dragover', e => { e.preventDefault(); montageUploadZone.classList.add('dragover'); });
+montageUploadZone.addEventListener('dragleave', () => montageUploadZone.classList.remove('dragover'));
+montageUploadZone.addEventListener('drop', e => {
+  e.preventDefault();
+  montageUploadZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) setMontageVideo(e.dataTransfer.files[0]);
+});
+montageFileInput.addEventListener('change', () => { if (montageFileInput.files.length) setMontageVideo(montageFileInput.files[0]); });
+
+function setMontageVideo(file) {
+  montageVideoFile = file;
+  document.getElementById('montageFileName').textContent = file.name;
+  montageUploadZone.classList.add('has-file');
+  if (selectedProjectId) clearProject();
+  document.getElementById('montageStartBtn').disabled = file ? false : true;
+  const card = document.getElementById('projectPreviewCard');
+  const video = document.getElementById('projectPreviewVideo');
+  if (window.__montageObjectUrl) URL.revokeObjectURL(window.__montageObjectUrl);
+  window.__montageObjectUrl = URL.createObjectURL(file);
+  video.src = window.__montageObjectUrl;
+  card.classList.add('active');
+  updateAnimationPreview();
+  updateSubtitlePreviewStyle();
+}
+let montageVideoFile = null;
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function fmtTimecode(t) {
+  t = Math.max(0, t || 0);
+  const m = Math.floor(t / 60);
+  const s = t % 60;
+  const ss = Math.floor(s);
+  const ms = Math.floor((s - ss) * 1000);
+  return String(m).padStart(2, '0') + ':' + String(ss).padStart(2, '0') + '.' + String(ms).padStart(3, '0');
+}
+
+function timecodeToSec(tc) {
+  if (typeof tc === 'number') return tc;
+  const raw = String(tc || '');
+  const m = raw.match(/^(\d+):(\d{2})\.(\d{3})$/);
+  if (m) return (+m[1]) * 60 + (+m[2]) + (+m[3]) / 1000;
+  const n = parseFloat(raw);
+  return isNaN(n) ? 0 : n;
+}
+
+function buildKeybar(ids, marks) {
+  // ids: {keybar, markers, playhead, video, cur, dur}
+  const kb = document.getElementById(ids.keybar);
+  const mk = document.getElementById(ids.markers);
+  const ph = document.getElementById(ids.playhead);
+  const v = document.getElementById(ids.video);
+  const cur = document.getElementById(ids.cur);
+  const dur = document.getElementById(ids.dur);
+  let duration = v.duration || 0;
+
+  const fallbackDur = () => {
+    if (marks && marks.length) return Math.max(...marks.map(m => m.time));
+    return 0;
+  };
+  const activeDur = () => duration || fallbackDur() || 0;
+
+  function buildMarkers() {
+    const d = activeDur();
+    if (!d) return;
+    mk.innerHTML = '';
+    for (const m of marks) {
+      const el = document.createElement('div');
+      el.className = 'keybar-marker' + (m.cls ? ' ' + m.cls : '');
+      el.style.left = Math.min(100, Math.max(0, (m.time / d) * 100)) + '%';
+      el.title = fmtTimecode(m.time);
+      mk.appendChild(el);
+    }
+  }
+
+  kb.onclick = e => {
+    const rect = kb.getBoundingClientRect();
+    const r = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const d = activeDur();
+    if (d) v.currentTime = r * d;
+  };
+
+  v.onloadedmetadata = () => {
+    duration = v.duration || 0;
+    dur.textContent = fmtTimecode(duration);
+    buildMarkers();
+  };
+
+  v.ontimeupdate = () => {
+    const t = v.currentTime || 0;
+    const d = activeDur();
+    ph.style.left = (d ? (t / d) * 100 : 0) + '%';
+    cur.textContent = fmtTimecode(t);
+  };
+
+  // Metadata may load at any moment (or already be loaded); watch until ready.
+  if (kb._timer) clearInterval(kb._timer);
+  kb._timer = setInterval(() => {
+    const d = v.duration || 0;
+    if (d) {
+      duration = d;
+      dur.textContent = fmtTimecode(d);
+      buildMarkers();
+      clearInterval(kb._timer);
+      kb._timer = null;
+    }
+  }, 200);
+  if (v.readyState >= 1) {
+    duration = v.duration || 0;
+    dur.textContent = fmtTimecode(duration);
+  } else {
+    dur.textContent = fmtTimecode(0);
+  }
+  buildMarkers();
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function mountSubtitleOverlay(cfg) {
+  const v = document.getElementById(cfg.video);
+  const card = document.getElementById(cfg.card);
+  const textEl = document.getElementById(cfg.text);
+  const tips = {
+    x: cfg.tipX ? document.getElementById(cfg.tipX) : null,
+    y: cfg.tipY ? document.getElementById(cfg.tipY) : null,
+    s: cfg.tipS ? document.getElementById(cfg.tipS) : null,
+  };
+  const state = { x: 0.50, y: 0.78, scale: 1.0 };
+  const pointers = new Map();
+  let lastDist = 0;
+  let gesture = null;
+
+  function readState() {
+    const hx = document.getElementById('montageSubtitleX');
+    const hy = document.getElementById('montageSubtitleY');
+    const hs = document.getElementById('montageSubtitleScale');
+    if (hx && !Number.isNaN(parseFloat(hx.value))) state.x = clamp(parseFloat(hx.value), 0, 1);
+    if (hy && !Number.isNaN(parseFloat(hy.value))) state.y = clamp(parseFloat(hy.value), 0, 1);
+    if (hs && !Number.isNaN(parseFloat(hs.value))) state.scale = clamp(parseFloat(hs.value), 0.5, 2.5);
+  }
+
+  function persist() {
+    const hx = document.getElementById('montageSubtitleX');
+    const hy = document.getElementById('montageSubtitleY');
+    const hs = document.getElementById('montageSubtitleScale');
+    if (hx) hx.value = state.x.toFixed(2);
+    if (hy) hy.value = state.y.toFixed(2);
+    if (hs) hs.value = state.scale.toFixed(2);
+    const sel = document.getElementById('montageSubtitlePosition');
+    if (sel) sel.value = 'custom';
+  }
+
+  function render() {
+    card.style.left = (state.x * 100) + '%';
+    card.style.top = (state.y * 100) + '%';
+    card.style.setProperty('--sub-scale', state.scale.toFixed(2));
+    if (tips.x) tips.x.textContent = state.x.toFixed(2);
+    if (tips.y) tips.y.textContent = state.y.toFixed(2);
+    if (tips.s) tips.s.textContent = state.scale.toFixed(2);
+  }
+
+  function dist2(a, b) {
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  }
+
+  card.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 1) {
+      gesture = 'drag';
+      card.classList.add('roaming');
+    } else if (pointers.size === 2) {
+      gesture = 'pinch';
+      const [a, b] = [...pointers.values()];
+      lastDist = dist2(a, b);
+    }
+  });
+
+  card.addEventListener('pointermove', (e) => {
+    if (!pointers.has(e.pointerId)) return;
+    const rect = v.getBoundingClientRect();
+    const prev = pointers.get(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (gesture === 'drag') {
+      state.x = clamp(state.x + (e.clientX - prev.x) / rect.width, 0.05, 0.95);
+      state.y = clamp(state.y + (e.clientY - prev.y) / rect.height, 0.05, 0.95);
+      persist();
+      render();
+    } else if (gesture === 'pinch') {
+      const [a, b] = [...pointers.values()];
+      const d = dist2(a, b);
+      if (lastDist > 0) {
+        state.scale = clamp(state.scale * (d / lastDist), 0.5, 2.5);
+        persist();
+        render();
+      }
+      lastDist = d;
+    }
+  });
+
+  function endPointer(e) {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) lastDist = 0;
+    if (pointers.size === 0) {
+      gesture = null;
+      card.classList.remove('roaming');
+    }
+  }
+  card.addEventListener('pointerup', endPointer);
+  card.addEventListener('pointercancel', endPointer);
+
+  let segments = [];
+  const overlay = {
+    setSegments(segs) {
+      segments = (segs || []).slice().sort((a, b) => (a.start || 0) - (b.start || 0));
+      textEl.dataset.ready = '1';
+      showSegment(-1);
+    },
+    get state() { return state; },
+  };
+
+  function showSegment(when) {
+    if (!segments.length) {
+      if (cfg.placeholder) textEl.textContent = cfg.placeholder;
+      return;
+    }
+    const t = when >= 0 ? when : (v.currentTime || 0);
+    let cur = null;
+    for (const s of segments) {
+      if ((s.start || 0) <= t && t <= (s.end || 0)) { cur = s; break; }
+    }
+    if (!cur && when < 0) cur = segments[0];
+    textEl.textContent = cur ? (cur.text || '') : '';
+  }
+
+  v.addEventListener('timeupdate', () => showSegment(-1));
+  v.addEventListener('loadedmetadata', () => showSegment(-1));
+
+  readState();
+  render();
+  return overlay;
+}
+
+// Re-read hidden x/y/scale if the select was changed manually to a preset
+document.addEventListener('change', (e) => {
+  if (e.target && e.target.id === 'montageSubtitlePosition') {
+    const sel = e.target;
+    if (sel.value !== 'custom') {
+      const pos = { bottom: { x: 0.5, y: 0.78 }, center: { x: 0.5, y: 0.5 }, top: { x: 0.5, y: 0.18 } }[sel.value] || { x: 0.5, y: 0.78 };
+      const hx = document.getElementById('montageSubtitleX');
+      const hy = document.getElementById('montageSubtitleY');
+      if (hx) hx.value = String(pos.x);
+      if (hy) hy.value = String(pos.y);
+    }
+  }
+});
+
+function setupTranscribePreview() {
+  if (!transcribeIsVideo || !jobId) return;
+  const marks = [];
+  for (const s of (segments || [])) {
+    marks.push({ time: s.start });
+    marks.push({ time: s.end, cls: 'word' });
+  }
+  buildKeybar({
+    keybar: 'trPreviewKeybar', markers: 'trPreviewMarkers', playhead: 'trPreviewPlayhead',
+    video: 'transcribePreviewVideo', cur: 'trPreviewCur', dur: 'trPreviewDur'
+  }, marks);
+  document.getElementById('useInMontageBtn').disabled = false;
+  const seg = segments || [];
+  const plural = seg.length % 10 === 1 && seg.length % 100 !== 11 ? 'сегмент'
+    : seg.length % 10 >= 2 && seg.length % 10 <= 4 && (seg.length % 100 < 10 || seg.length % 100 >= 20) ? 'сегмента' : 'сегментов';
+  document.getElementById('trPreviewHint').textContent =
+    `${seg.length} ${plural} — точки таймлайна на полосе; клик — перемотка.`;
+}
+
+async function useInMontage() {
+  const btn = document.getElementById('useInMontageBtn');
+  btn.disabled = true;
+  btn.textContent = 'Создаю проект...';
+  const form = new FormData();
+  form.append('transcript_job_id', jobId);
+  let pid = null;
+  try {
+    const res = await fetch('/api/projects/link', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
+    pid = data.project_id;
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = 'Использовать в монтаже';
+    document.getElementById('trPreviewHint').textContent = 'Не удалось создать проект: ' + e.message;
+    return;
+  }
+  try {
+    selectedProjectId = pid;
+    switchView('montage');
+    selectProject(pid, true);
+    document.getElementById('montageStartBtn').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch(e) {
+    document.getElementById('trPreviewHint').textContent = 'Ошибка перехода: ' + (e && e.message ? e.message : e);
+    btn.disabled = false;
+    btn.textContent = 'Использовать в монтаже';
+  }
+}
+
+async function refreshProjects() {
+  let list = [];
+  try {
+    const res = await fetch('/api/projects');
+    list = (await res.json()).projects || [];
+  } catch(e) { return; }
+  projects = list;
+  const container = document.getElementById('projectsList');
+  const count = document.getElementById('projectsCount');
+  count.textContent = list.length ? `(${list.length})` : '';
+  if (!list.length) {
+    container.innerHTML = '<div style="font-size:13px;color:var(--text2)">Пока нет проектов. Транскрибируйте видео на первой вкладке — оно появится здесь.</div>';
+    return;
+  }
+  container.innerHTML = list.map(p => {
+    const sel = p.id === selectedProjectId;
+    const st = p.transcript_status;
+    const badges =
+      st === 'done' ? '<span class="badge ok">транскрибация готова</span>'
+      : st === 'processing' ? '<span class="badge" style="background:#3a3320">обработка…</span>'
+      : '<span class="badge no">нет транскрибации</span>';
+    const segs = p.segments ? `<span class="badge" style="background:#23304a">${p.segments} seg</span>` : '';
+    return `<div class="project-row${sel ? ' selected' : ''}">
+      <div class="meta">
+        <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(p.name)}">${esc(p.name)}</div>
+        <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap">${badges}${segs}${p.video_ok?'':'<span class="badge no">видео недоступно</span>'}</div>
+      </div>
+      <div class="actions">
+        ${p.transcript_status === 'done' ? `<button class="btn" onclick="selectProject('${p.id}')">Использовать</button>` : ''}
+        <button class="btn" onclick="deleteProject('${p.id}')" title="Удалить">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
+  if (!selectedProjectId && list.length) {
+    const ready = list.find(p => p.transcript_status === 'done' && p.video_ok);
+    if (ready) selectProject(ready.id, true);
+  }
+}
+
+function selectProject(id, silent) {
+  const p = projects.find(x => x.id === id);
+  if (!p) return;
+  selectedProjectId = id;
+  montageVideoFile = null;
+  document.getElementById('montageFileName').textContent = '';
+  document.getElementById('montageUploadZone').classList.remove('has-file');
+  document.getElementById('montageProjectSel').style.display = 'block';
+  document.getElementById('montageProjectName').textContent = p.name;
+  document.getElementById('montageStartBtn').disabled = p.transcript_status !== 'done';
+  showProjectPreview(p);
+  if (!silent) refreshProjects();
+}
+
+function clearProject() {
+  selectedProjectId = null;
+  document.getElementById('montageProjectSel').style.display = 'none';
+  document.getElementById('montageStartBtn').disabled = !montageVideoFile;
+  document.getElementById('projectPreviewCard').classList.remove('active');
+  refreshProjects();
+}
+
+async function deleteProject(id) {
+  try {
+    await fetch(`/api/projects/${id}`, { method: 'DELETE' });
+    if (selectedProjectId === id) clearProject();
+    refreshProjects();
+  } catch(e) { montageError('Не удалось удалить проект: ' + e.message); }
+}
+
+async function showProjectPreview(p) {
+  const card = document.getElementById('projectPreviewCard');
+  if (!p || !p.video_ok || !p.transcript_job_id) {
+    card.classList.remove('active');
+    return;
+  }
+  card.classList.add('active');
+  const v = document.getElementById('projectPreviewVideo');
+  const tj = p.transcript_job_id;
+  if (v.dataset.tj !== tj) {
+    v.dataset.tj = tj;
+    v.src = `/api/video/${tj}?t=${Date.now()}`;
+    v.poster = `/api/thumb/${tj}?t=${Date.now()}`;
+  }
+  let segs = [];
+  try {
+    const r = await fetch(`/api/result/${tj}`);
+    const d = await r.json();
+    segs = d.segments || [];
+  } catch(e) {}
+  window.__lastSegs = segs;
+  if (window.__projectOverlay) window.__projectOverlay.setSegments(segs);
+  const marks = [];
+  for (const s of segs) {
+    marks.push({ time: s.start });
+    marks.push({ time: s.end, cls: 'word' });
+  }
+  buildKeybar({
+    keybar: 'projectPreviewKeybar', markers: 'projectPreviewMarkers', playhead: 'projectPreviewPlayhead',
+    video: 'projectPreviewVideo', cur: 'projectPreviewCur', dur: 'projectPreviewDur'
+  }, marks);
+}
+
+async function loadAnimationOptions() {
+  try {
+    const res = await fetch('/api/montage/animations');
+    const data = await res.json();
+    const sel = document.getElementById('montageAnimationId');
+    if (!data.animations || !data.animations.length) return;
+    const selected = sel.value;
+    sel.innerHTML = '<option value="">Без анимации</option>' +
+      data.animations.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+    if (selected && [...sel.options].some(option => option.value === selected)) {
+      sel.value = selected;
+    } else {
+      const cat = data.animations.find(a => a.id.includes('Running_Cat')) || data.animations[0];
+      if (cat) sel.value = cat.id;
+    }
+    updateAnimationPreview();
+  } catch(e) {}
+}
+
+let animationPreviewData = {id: '', fps: 10, frames: []};
+async function updateAnimationPreview() {
+  const preview = document.getElementById('timelineAnimationPreview');
+  const select = document.getElementById('montageAnimationId');
+  if (!preview || !select) return;
+  preview.classList.toggle('active', Boolean(select.value));
+  if (!select.value) return;
+  if (animationPreviewData.id !== select.value) {
+    try {
+      const manifest = await (await fetch(`/animation-assets/${encodeURIComponent(select.value)}/manifest.json`, {cache:'no-store'})).json();
+      animationPreviewData = {
+        id: select.value,
+        fps: Number(manifest.fps) || 10,
+        frames: (manifest.frames || []).map(frame => `/animation-assets/${encodeURIComponent(select.value)}/${encodeURIComponent(typeof frame === 'string' ? frame : frame.file)}`),
+      };
+    } catch (_) { animationPreviewData = {id: select.value, fps: 10, frames: []}; }
+  }
+  syncAnimationPreview();
+}
+
+function syncAnimationPreview() {
+  const preview = document.getElementById('timelineAnimationPreview');
+  const video = document.getElementById('projectPreviewVideo');
+  const item = preview?.querySelector('.timeline-animation-item');
+  const fill = preview?.querySelector('.timeline-animation-fill');
+  if (!preview?.classList.contains('active') || !item || !fill) return;
+  const start = Math.max(0, Number(document.getElementById('montageAnimationStart').value) || 0);
+  const duration = Number(video.duration) || 6;
+  const time = Number(video.currentTime) || 0;
+  const rel = Math.max(0, Math.min(1, (time - start) / Math.max(.001, duration - start)));
+  fill.style.width = `${rel * 100}%`;
+  item.style.left = `${rel * 100}%`;
+  item.style.display = time >= start && animationPreviewData.frames.length ? 'block' : 'none';
+  if (animationPreviewData.frames.length) {
+    item.src = animationPreviewData.frames[Math.floor(time * animationPreviewData.fps) % animationPreviewData.frames.length];
+    const scale = video.videoWidth ? video.clientWidth / video.videoWidth : 1;
+    item.style.width = `${Math.max(20, 72 * scale)}px`;
+  }
+  const markers = document.getElementById('projectPreviewMarkers');
+  if (markers && duration) {
+    let marker = markers.querySelector('.keybar-marker.anim');
+    if (!marker) {
+      marker = document.createElement('div');
+      marker.className = 'keybar-marker anim';
+      markers.appendChild(marker);
+    }
+    marker.style.left = `${Math.min(100, start / duration * 100)}%`;
+    marker.title = `Анимация: ${fmtTimecode(start)}`;
+  }
+}
+
+function updateSubtitlePreviewStyle() {
+  const card = document.getElementById('projectPreviewSubCard');
+  const box = document.getElementById('montageSubtitleBox');
+  const font = document.getElementById('montageSubtitleFont');
+  if (!card || !box || !font) return;
+  card.classList.toggle('no-box', !box.checked);
+  card.style.fontFamily = font.options[font.selectedIndex]?.text.includes('Системный')
+    ? '-apple-system, BlinkMacSystemFont, sans-serif'
+    : 'ComfortaaPreview, sans-serif';
+}
+
+let animationBuilderFrames = [];
+const animationBuilderInput = document.getElementById('animationBuilderInput');
+animationBuilderInput.addEventListener('change', () => {
+  animationBuilderFrames.push(...animationBuilderInput.files);
+  animationBuilderInput.value = '';
+  renderAnimationFrames();
+});
+
+function renderAnimationFrames() {
+  const list = document.getElementById('animationFrameList');
+  list.innerHTML = '';
+  animationBuilderFrames.forEach((file, index) => {
+    const card = document.createElement('div');
+    card.className = 'animation-frame';
+    card.draggable = true;
+    card.dataset.index = index;
+    const image = document.createElement('img');
+    image.src = URL.createObjectURL(file);
+    image.onload = () => URL.revokeObjectURL(image.src);
+    const label = document.createElement('small');
+    label.textContent = `${index + 1}. ${file.name}`;
+    card.append(image, label);
+    card.ondragstart = event => {
+      card.classList.add('dragging');
+      event.dataTransfer.setData('text/plain', String(index));
+    };
+    card.ondragend = () => card.classList.remove('dragging');
+    card.ondragover = event => event.preventDefault();
+    card.ondrop = event => {
+      event.preventDefault();
+      const from = Number(event.dataTransfer.getData('text/plain'));
+      if (!Number.isInteger(from) || from === index) return;
+      const [frame] = animationBuilderFrames.splice(from, 1);
+      animationBuilderFrames.splice(index, 0, frame);
+      renderAnimationFrames();
+    };
+    list.appendChild(card);
+  });
+}
+
+async function saveAnimation() {
+  const status = document.getElementById('animationBuilderStatus');
+  const button = document.getElementById('animationBuilderSave');
+  if (!animationBuilderFrames.length) {
+    status.textContent = 'Добавьте кадры.';
+    return;
+  }
+  button.disabled = true;
+  status.textContent = 'Сохранение кадров...';
+  const form = new FormData();
+  form.append('name', document.getElementById('animationBuilderName').value || 'Новая анимация');
+  form.append('fps', document.getElementById('animationBuilderFps').value || '10');
+  animationBuilderFrames.forEach(frame => form.append('frames', frame, frame.name));
+  try {
+    const response = await fetch('/api/montage/animations/create', {method:'POST', body:form});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+    status.textContent = `Анимация «${data.animation.name}» сохранена и добавлена в автомонтаж.`;
+    await loadAnimationOptions();
+    const select = document.getElementById('montageAnimationId');
+    select.value = data.animation.id;
+    await updateAnimationPreview();
+  } catch (error) {
+    status.textContent = `Ошибка: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function refreshMontageStatus() {
+  try {
+    const res = await fetch('/api/montage/status', {cache: 'no-store'});
+    const s = await res.json();
+    const row = document.getElementById('montageStatusRow');
+    row.innerHTML = '';
+    const badge = (ok, label, cls) => `<span class="badge ${ok ? 'ok' : 'no'} ${cls || ''}">${label}: ${ok ? 'готово' : 'нет'}</span>`;
+    row.innerHTML =
+      badge(s.online, 'Интернет') + badge(s.opencode, 'opencode') +
+      badge(s.bigpickle_enabled, 'BigPickle', 'up') +
+      badge(s.face_model, 'Face landmarker') + badge(s.font, 'Шрифт СРТ') +
+      badge(s.media_repo, 'Media repo') +
+      `<span class="badge ${s.publishers.instagram_reels ? 'ok' : 'no'}">Instagram: ${s.publishers.instagram_reels ? 'ок' : 'нет'}</span>` +
+      `<span class="badge ${s.publishers.threads ? 'ok' : 'no'}">Threads: ${s.publishers.threads ? 'ок' : 'нет'}</span>` +
+      `<span class="badge ${s.publishers.youtube ? 'ok' : 'no'}">YouTube: ${s.publishers.youtube ? 'ок' : 'нет'}</span>` +
+      `<span class="badge ${s.publishers.telegram ? 'ok' : 'no'}">Telegram: ${s.publishers.telegram ? 'ок' : 'нет'}</span>`;
+    document.getElementById('montageStatusDetail').textContent =
+      `Анимации: ${(s.animations || []).map(a => a.name).join(', ') || 'нет'}`;
+    const fontSelect = document.getElementById('montageSubtitleFont');
+    if (fontSelect && !fontSelect.dataset.loaded) {
+      const selectedFont = fontSelect.value;
+      fontSelect.innerHTML = (s.fonts || []).map(f => `<option value="${esc(f.path)}">${esc(f.name)}</option>`).join('');
+      if ([...fontSelect.options].some(option => option.value === selectedFont)) {
+        fontSelect.value = selectedFont;
+      } else if (fontSelect.options.length) {
+        fontSelect.selectedIndex = 0;
+      }
+      fontSelect.dataset.loaded = '1';
+      updateSubtitlePreviewStyle();
+    }
+  } catch(e) {
+    document.getElementById('montageStatusRow').textContent = 'Статус недоступен: ' + e.message;
+  }
+}
+
+async function startMontage() {
+  document.getElementById('montageStartBtn').disabled = true;
+  document.getElementById('montageErrorBox').classList.remove('active');
+  document.getElementById('montageMontageErrorBox') && document.getElementById('montageMontageErrorBox').classList.remove('active');
+  document.getElementById('montageResultsCard').classList.remove('active');
+  const form = new FormData();
+  let hasText = false;
+  if (selectedProjectId) {
+    form.append('project_id', selectedProjectId);
+    hasText = true;
+  } else {
+    if (montageVideoFile) form.append('video', montageVideoFile);
+    const useTranscript = document.getElementById('montageUseTranscript').checked;
+    const srtInput = document.getElementById('montageSrtInput');
+    if (useTranscript && transcriptJobId) {
+      form.append('transcript_job_id', transcriptJobId);
+      hasText = true;
+    } else if (srtInput.files.length) {
+      form.append('srt', srtInput.files[0]);
+      hasText = true;
+    }
+  }
+  if (!hasText) {
+    montageError('Выберите проект, загрузите SRT или включите «использовать транскрибацию»');
+    document.getElementById('montageStartBtn').disabled = false;
+    return;
+  }
+  form.append('subtitle_mode', document.getElementById('montageSubtitleMode').value);
+  form.append('subtitle_position', document.getElementById('montageSubtitlePosition').value);
+  const sx = document.getElementById('montageSubtitleX');
+  if (sx && sx.value) form.append('subtitle_x', sx.value);
+  const sy = document.getElementById('montageSubtitleY');
+  if (sy && sy.value) form.append('subtitle_y', sy.value);
+  const ss = document.getElementById('montageSubtitleScale');
+  if (ss && ss.value) form.append('subtitle_scale', ss.value);
+  form.append('subtitle_box', document.getElementById('montageSubtitleBox').checked);
+  const subtitleFont = document.getElementById('montageSubtitleFont').value;
+  if (subtitleFont) form.append('subtitle_font', subtitleFont);
+  form.append('edge_mode', document.getElementById('montageEdgeMode').value);
+  form.append('face_tracking', document.getElementById('montageFaceTrack').checked);
+  form.append('autozoom', document.getElementById('montageAutozoom').checked);
+  form.append('subtitles', true);
+  form.append('bigpickle', document.getElementById('montageBigpickle').checked);
+
+  const animId = document.getElementById('montageAnimationId').value;
+  if (animId) {
+    form.append('animation_id', animId);
+    form.append('animation_start', document.getElementById('montageAnimationStart').value || 0);
+    form.append('animation_offset_x', document.getElementById('montageAnimationOffset').value || 0);
+    form.append('animation_bar', true);
+  }
+  if (document.getElementById('montageZoomOverride').checked) {
+    const raw = document.getElementById('montageZoomTimeline').value.trim();
+    try {
+      JSON.parse(raw);
+      form.append('zoom_timeline_json', raw);
+    } catch(e) {
+      montageError('Таймлайн автозума — некорректный JSON');
+      document.getElementById('montageStartBtn').disabled = false;
+      return;
+    }
+  }
+
+  const logBox = document.getElementById('montageLog');
+  logBox.textContent = '';
+
+  try {
+    const res = await fetch('/api/montage/render', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
+    montageJobId = data.job_id;
+    localStorage.setItem('montageJobId', montageJobId);
+    connectMontageWs();
+    startMontagePolling();
+  } catch(e) {
+    montageError('Ошибка запуска монтажа: ' + e.message);
+    document.getElementById('montageStartBtn').disabled = false;
+  }
+}
+
+function connectMontageWs() {
+  if (!montageJobId || (montageWs && montageWs.readyState < 2)) return;
+  montageWs = new WebSocket(`ws://${location.host}/ws/${montageJobId}`);
+  montageWs.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'progress') {
+      montageUpdateProgress(msg.progress, msg.stage, msg.detail);
+    } else if (msg.type === 'log') {
+      const logBox = document.getElementById('montageLog');
+      logBox.textContent += msg.message + '\n';
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+  };
+  montageWs.onclose = () => {
+    if (montageJobId) refreshMontageResult();
+  };
+}
+
+let montagePollTimer = null;
+function startMontagePolling() {
+  if (montagePollTimer || !montageJobId) return;
+  montagePollTimer = setInterval(refreshMontageResult, 1200);
+  refreshMontageResult();
+}
+
+function montageUpdateProgress(progress, stage, detail) {
+  const pct = Math.max(0, Math.min(100, Number(progress) || 0));
+  document.getElementById('montageProgressBar').style.width = pct + '%';
+  document.getElementById('montageProgressPercent').textContent = pct.toFixed(1) + '%';
+  document.getElementById('montageProgressStage').textContent = detail || stage;
+  document.getElementById('montageProgressDetail').textContent = detail || '';
+  if (stage === 'done' || stage === 'published' || stage === 'error') {
+    setTimeout(refreshMontageResult, 600);
+  }
+}
+
+async function refreshMontageResult() {
+  if (!montageJobId) return;
+  try {
+    const res = await fetch(`/api/montage/result/${montageJobId}`);
+    const data = await res.json();
+    montageUpdateProgress(data.progress || 0, data.stage || data.status, data.detail || '');
+    document.getElementById('montageStartBtn').disabled = true;
+    if (data.status === 'error') {
+      clearInterval(montagePollTimer);
+      montagePollTimer = null;
+      montageError(data.error || 'Ошибка монтажа');
+      document.getElementById('montageStartBtn').disabled = false;
+      return;
+    }
+    if (data.result) {
+      clearInterval(montagePollTimer);
+      montagePollTimer = null;
+      localStorage.removeItem('montageJobId');
+      document.getElementById('montageResultsCard').classList.add('active');
+      const info = document.getElementById('montageResultInfo');
+      const size = Math.round((data.result.video_size || 0) / 1048576);
+      info.textContent = `${data.result.job_id} • ${data.result.duration ? Math.round(data.result.duration) + 's' : ''}`;
+      const video = document.getElementById('montageVideo');
+      if (video.dataset.job !== montageJobId) {
+        video.dataset.job = montageJobId;
+        video.src = `/api/montage/preview/${montageJobId}?t=${Date.now()}`;
+        video.load();
+      }
+      document.getElementById('montageVideoStage').style.display = '';
+      document.getElementById('montageVideoTimebar').style.display = '';
+      document.getElementById('montageVideoKeybar').style.display = '';
+      document.getElementById('montagePublishBtn').disabled = false;
+
+      document.getElementById('montagePublishBtn').disabled = false;
+
+      if (window.__projectOverlay) window.__projectOverlay.setSegments(window.__lastSegs || []);
+
+      const eY = document.getElementById('montageSubtitleY');
+      const eX = document.getElementById('montageSubtitleX');
+      const eS = document.getElementById('montageSubtitleScale');
+      if (eY) eY.value = eY.value || '0.78';
+      if (eX) eX.value = eX.value || '0.50';
+      if (eS) eS.value = eS.value || '1.00';
+
+      const tl = data.result.timeline;
+      const zoomMarks = [];
+      if (tl && tl.zoom) {
+        for (const z of tl.zoom) {
+          zoomMarks.push({ time: timecodeToSec(z.timecode != null ? z.timecode : z.time) });
+        }
+      }
+      if (tl && tl.animation) {
+        zoomMarks.push({ time: Number(tl.animation.start) || 0, cls: 'anim' });
+      }
+      buildKeybar({
+        keybar: 'montageVideoKeybar', markers: 'montageVideoMarkers', playhead: 'montageVideoPlayhead',
+        video: 'montageVideo', cur: 'montageVideoCur', dur: 'montageVideoDur'
+      }, zoomMarks);
+
+      const tlBox = document.getElementById('montageTimelineInfo');
+      if (tl) {
+        let html = `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+          <span class="badge" style="background:#23304a">Позиция: ${esc(tl.subtitle_position)}</span>
+          <span class="badge" style="background:#23304a">Режим: ${esc(tl.subtitle_mode)}</span>
+          ${tl.animation ? `<span class="badge ok">Анимация: ${esc(tl.animation.id)} (старт ${tl.animation.start}s)</span>` : ''}
+        </div>`;
+        if (tl.zoom && tl.zoom.length) {
+          html += '<table style="width:100%;font-size:12px;border-collapse:collapse">';
+          html += '<tr style="color:var(--text2)"><th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)">Время</th><th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border)">Зум, %</th></tr>';
+          for (const z of tl.zoom) {
+            const timeLabel = z.timecode || (z.time != null ? z.time.toFixed(3) + 's' : '−');
+            html += `<tr><td style="padding:4px 8px;font-family:ui-monospace,monospace">${esc(timeLabel)}</td><td style="padding:4px 8px">${z.percent}%</td></tr>`;
+          }
+          html += '</table>';
+        } else {
+          html += '<div>Нет событий автозума</div>';
+        }
+        tlBox.innerHTML = html;
+      } else {
+        tlBox.textContent = 'Нет данных о таймлайне';
+      }
+    }
+    if (data.publish) {
+      const box = document.getElementById('montagePublishResults');
+      box.innerHTML = '';
+      for (const [kind, r] of Object.entries(data.publish)) {
+        const url = r.permalink || (r.watch_url || r.shorts_url) || r.thread_id || `message_id=${r.message_id}`;
+        if (url) box.innerHTML += `<div><span class="badge ok">${r.kind || kind}: OK</span> <a href="${url}" target="_blank" style="color:var(--accent2)">${url}</a></div>`;
+        else box.innerHTML += `<div><span class="badge ok">${r.kind || kind}: OK</span></div>`;
+      }
+      document.getElementById('montagePublishBtn').disabled = true;
+      document.getElementById('montagePublishBtn').textContent = 'Опубликовано';
+    }
+  } catch(e) {
+    montageError('Не удалось получить результат: ' + e.message);
+  }
+}
+
+async function shareMontage() {
+  if (!montageJobId) return;
+  const button = document.getElementById('shareMontageBtn');
+  const oldText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Подготовка видео...';
+  try {
+    const response = await fetch(`/api/montage/download/${montageJobId}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    const file = new File([blob], 'montage.mp4', {type: 'video/mp4'});
+    if (navigator.share && (!navigator.canShare || navigator.canShare({files: [file]}))) {
+      await navigator.share({title: 'Готовый ролик', files: [file]});
+      return;
+    }
+    if (navigator.share) {
+      await navigator.share({title: 'Готовый ролик', url: `${location.origin}/api/montage/download/${montageJobId}`});
+      return;
+    }
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'montage.mp4';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  } catch (error) {
+    if (error.name !== 'AbortError') montageError(`Не удалось открыть меню «Поделиться»: ${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = oldText;
+  }
+}
+
+async function publishMontage() {
+  const targets = [];
+  document.querySelectorAll('.tg-target:checked').forEach(cb => targets.push(cb.value));
+  if (!targets.length) {
+    montageError('Выберите хотя бы одну цель публикации');
+    return;
+  }
+  const text = document.getElementById('montageCaption').value.trim();
+  const targetsJson = targets.map(kind => {
+    const t = { kind };
+    if (text) { t.text = text; t.caption = text; t.title = text; }
+    return t;
+  });
+  const form = new FormData();
+  form.append('targets_json', JSON.stringify(targetsJson));
+  document.getElementById('montagePublishBtn').disabled = true;
+  document.getElementById('montageErrorBox').classList.remove('active');
+  document.getElementById('montageResultsCard').classList.remove('active');
+  try {
+    const res = await fetch(`/api/montage/${montageJobId}/publish`, { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) {
+      montageError(data.detail || 'Ошибка публикации');
+      document.getElementById('montagePublishBtn').disabled = false;
+      return;
+    }
+    connectMontageWs();
+  } catch(e) {
+    montageError('Ошибка публикации: ' + e.message);
+    document.getElementById('montagePublishBtn').disabled = false;
+  }
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
+}
+
+window.__subDragMounted = true;
+window.__projectOverlay = mountSubtitleOverlay({
+  video: 'projectPreviewVideo', card: 'projectPreviewSubCard', text: 'projectPreviewSubText',
+  tipX: 'projectPreviewSubX', tipY: 'projectPreviewSubY', tipS: 'projectPreviewSubScale',
+  placeholder: '…',
+});
+const projectPreviewVideo = document.getElementById('projectPreviewVideo');
+projectPreviewVideo.addEventListener('timeupdate', syncAnimationPreview);
+projectPreviewVideo.addEventListener('loadedmetadata', syncAnimationPreview);
+updateSubtitlePreviewStyle();
+
+loadAnimationOptions();
+refreshProjects();
+if (montageJobId) startMontagePolling();
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && montageJobId) {
+    refreshMontageResult();
+    connectMontageWs();
+  }
+  if (!document.hidden && jobId) startTranscriptionPolling();
+});
+</script>
+
+</body>
+</html>
