@@ -12,6 +12,11 @@ from fractions import Fraction
 from pathlib import Path
 from urllib.parse import quote
 
+try:
+    from montage.instaposter.git_auth import ensure_push_auth, git_env
+except ModuleNotFoundError:
+    from git_auth import ensure_push_auth, git_env
+
 CURL = shutil.which("curl") or "curl"
 
 
@@ -57,6 +62,7 @@ def run_process(
         encoding="utf-8",
         errors="replace",
         timeout=timeout,
+        env=git_env(),
     )
 
     if check and result.returncode != 0:
@@ -333,6 +339,10 @@ def publish_video_to_github(video_path: Path) -> tuple[Path, str]:
         print("   Файл в GitHub уже актуален, новый commit не нужен.")
 
     print("   git push...")
+    try:
+        ensure_push_auth(GITHUB_REPO_DIR)
+    except RuntimeError as exc:
+        die(str(exc))
     push = run_process(
         ["git", "push", "origin", GITHUB_BRANCH],
         cwd=GITHUB_REPO_DIR,

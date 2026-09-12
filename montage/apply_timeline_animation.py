@@ -77,7 +77,7 @@ def main() -> None:
     parser.add_argument("--start", type=float, default=0.0, help="Overlay appears after N seconds")
     parser.add_argument("--offset-x", type=int, default=0)
     parser.add_argument("--item-size", type=int, default=72)
-    parser.add_argument("--bar", type=int, default=1, help="Draw bottom progress bar")
+    parser.add_argument("--bar", type=int, default=0, help="Deprecated; the timeline bar is not rendered")
     args = parser.parse_args()
 
     input_video = Path(args.video)
@@ -140,17 +140,6 @@ def main() -> None:
             else:
                 rel = min(1.0, (t - start_time) / walk_span)
             base = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA))
-            draw = ImageDraw.Draw(base, "RGBA")
-
-            if args.bar:
-                draw.rounded_rectangle(
-                    [timeline_x, timeline_y, timeline_x + timeline_w, timeline_y + 6],
-                    radius=3, fill=(0, 0, 0, 130),
-                )
-                draw.rounded_rectangle(
-                    [timeline_x, timeline_y, timeline_x + int(timeline_w * rel), timeline_y + 6],
-                    radius=3, fill=(255, 255, 255, 180),
-                )
 
             base_x = timeline_x + int(timeline_w * rel)
             if anim_frames and t >= start_time:

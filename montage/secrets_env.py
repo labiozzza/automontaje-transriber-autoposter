@@ -39,10 +39,27 @@ def reload_secrets_env() -> None:
 
 def get_software_defaults() -> dict:
     load_secrets_env()
+    git_config = MEDIA_REPO_DIR / ".git" / "config"
+    try:
+        github_uses_https = "url = https://" in git_config.read_text(encoding="utf-8")
+    except OSError:
+        github_uses_https = True
+    github_ready = not github_uses_https or bool(
+        os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    )
     return {
         "github_repo_dir": os.environ.get("GITHUB_REPO_DIR", str(MEDIA_REPO_DIR)),
-        "instagram_ready": bool(os.environ.get("INSTAGRAM_ACCESS_TOKEN") and os.environ.get("IG_USER_ID")),
-        "threads_ready": bool(os.environ.get("THREADS_ACCESS_TOKEN") and os.environ.get("THREADS_USER_ID")),
+        "github_ready": github_ready,
+        "instagram_ready": bool(
+            os.environ.get("INSTAGRAM_ACCESS_TOKEN")
+            and os.environ.get("IG_USER_ID")
+            and github_ready
+        ),
+        "threads_ready": bool(
+            os.environ.get("THREADS_ACCESS_TOKEN")
+            and os.environ.get("THREADS_USER_ID")
+            and github_ready
+        ),
         "youtube_ready": (PROJECT_DIR / "montage" / "instaposter" / "token.json").exists(),
         "telegram_ready": bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID")),
     }

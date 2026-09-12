@@ -6,11 +6,13 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from fractions import Fraction
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
@@ -120,6 +122,69 @@ class YouTubePublisher:
         if result.get("status") != "auth_ok":
             raise RuntimeError("YouTube authorization is not ready")
 
+    def _duration(self, video_path: Path) -> float:
+        ffprobe = shutil.which("ffprobe") or "ffprobe"
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(video_path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("Не удалось определить длительность YouTube-видео")
+        return float(result.stdout.strip())
+
+    def _frame_rate(self, video_path: Path) -> str:
+        ffprobe = shutil.which("ffprobe") or "ffprobe"
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-of", "default=nw=1:nk=1", str(video_path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+        )
+        try:
+            source = Fraction(result.stdout.strip())
+            value = float(source)
+        except (ValueError, ZeroDivisionError):
+            return "30000/1001"
+        standards = [Fraction(24000, 1001), Fraction(24, 1), Fraction(25, 1), Fraction(30000, 1001), Fraction(30, 1), Fraction(50, 1), Fraction(60000, 1001), Fraction(60, 1)]
+        nearest = min(standards, key=lambda rate: abs(float(rate) - value))
+        return str(nearest) if abs(float(nearest) - value) <= 1.0 else str(source.limit_denominator(1001))
+
+    def prepare_video(self, source: Path, output: Path, progress: Callable[[float, str], None]) -> Path:
+        duration = max(0.001, self._duration(source))
+        fps = self._frame_rate(source)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.unlink(missing_ok=True)
+        ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+        command = [
+            ffmpeg, "-y", "-fflags", "+genpts", "-i", str(source),
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-vf", f"setpts=PTS-STARTPTS,fps={fps}",
+            "-af", "aresample=async=1:first_pts=0,asetpts=PTS-STARTPTS",
+            "-c:v", "libx264", "-profile:v", "high", "-level:v", "4.1",
+            "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-fps_mode", "cfr", "-avoid_negative_ts", "make_zero", "-shortest",
+            "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output),
+        ]
+        with self.log_path.open("a", encoding="utf-8", errors="replace") as log:
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=log, text=True,
+                encoding="utf-8", errors="replace",
+            )
+            assert process.stdout is not None
+            for line in process.stdout:
+                key, _, value = line.strip().partition("=")
+                if key not in {"out_time_us", "out_time_ms"}:
+                    continue
+                try:
+                    percent = min(99, max(0, float(value) / 1_000_000 / duration * 100))
+                except ValueError:
+                    continue
+                progress(percent, f"Подготовка YouTube CFR: {percent:.0f}%")
+            code = process.wait()
+        if code != 0 or not output.exists():
+            raise RuntimeError("Не удалось подготовить синхронизированную YouTube-версию")
+        progress(100, f"YouTube CFR {fps}: готово")
+        return output
+
     def upload(
         self,
         video_path: Path,
@@ -211,7 +276,7 @@ def _bridge_upload(module: ModuleType, payload: dict[str, Any], protocol: Any, c
     privacy = str(payload.get("privacy") or "public")
     if not video_path.is_file():
         raise ValueError("video_not_found")
-    if not title or len(title) > 100:
+    if not title or len(title) > 119:
         raise ValueError("invalid_title")
     if privacy not in {"public", "private", "unlisted"}:
         raise ValueError("invalid_privacy")

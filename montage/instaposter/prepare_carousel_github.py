@@ -8,6 +8,11 @@ import sys
 from pathlib import Path
 from PIL import Image
 
+try:
+    from montage.instaposter.git_auth import ensure_push_auth, git_env
+except ModuleNotFoundError:
+    from git_auth import ensure_push_auth, git_env
+
 CURL = shutil.which("curl") or "curl"
 
 
@@ -29,6 +34,7 @@ def run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=git_env(),
     )
 
 
@@ -105,6 +111,10 @@ def main() -> None:
     else:
         print("Изменений для commit нет.")
 
+    try:
+        ensure_push_auth(REPO_DIR)
+    except RuntimeError as exc:
+        die(str(exc))
     push = run(["git", "push", "origin", BRANCH], cwd=REPO_DIR)
     if push.returncode != 0:
         die(push.stdout + "\n" + push.stderr)

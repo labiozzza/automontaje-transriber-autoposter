@@ -189,6 +189,23 @@ def group_sentences(words: list[Cue]) -> list[list[Cue]]:
     return merged
 
 
+def group_phrases(words: list[Cue]) -> list[list[Cue]]:
+    """Group consecutive words into short, readable chunks of 2-5 words."""
+    groups: list[list[Cue]] = []
+    index = 0
+    while index < len(words):
+        remaining = len(words) - index
+        size = min(5, remaining)
+        if remaining - size == 1:
+            size -= 1
+        if size <= 1 and groups:
+            groups[-1].append(words[index])
+            break
+        groups.append(words[index:index + max(1, size)])
+        index += max(1, size)
+    return groups
+
+
 def _run_opencode(prompt: str, timeout: float = BIGPICKLE_TIMEOUT_SECONDS) -> str:
     cmd = [
         OPENCODE_BIN, "run", "-m", BIGPICKLE_MODEL, "--format", "json", prompt,
@@ -535,12 +552,14 @@ def main() -> None:
     source_cues = parse_srt(srt_path)
     words = split_cue_to_word_cues(source_cues)
     sentences = group_sentences(words)
+    phrases = group_phrases(words)
     duration = max(w.end for w in words)
 
     lm = ask_bigpickle(sentences)
     rules = build_rules(words, sentences, lm)
 
     sentence_items = make_subtitle_items(sentences, words, rules)
+    phrase_items = make_subtitle_items(phrases, words, rules)
     word_items = make_subtitle_items([[w] for w in words], words, rules)
     zoom_events = build_zoom_events(sentences, rules, lm, duration)
 
@@ -587,20 +606,34 @@ def main() -> None:
         },
         "subtitles": word_items,
     }
+    subtitle_phrases_config = {
+        "render": base_subtitle_render("output/timeline_zoom_subtitles_phrases.mp4"),
+        "source_transcript": str(srt_path.name),
+        "subtitle_mode": "phrases",
+        "highlight_rules": {
+            "green_words": rules["green"],
+            "yellow_words": rules["yellow"],
+            "red_words": rules["red"],
+        },
+        "subtitles": phrase_items,
+    }
 
     zoom_path = out_dir / "zoom_timeline_config.json"
     subtitle_path = out_dir / "subtitle_timeline_config.json"
     subtitle_words_path = out_dir / "subtitle_timeline_config_words.json"
+    subtitle_phrases_path = out_dir / "subtitle_timeline_config_phrases.json"
 
     write_json(zoom_path, zoom_config)
     write_json(subtitle_path, subtitle_sentences_config)
     write_json(subtitle_words_path, subtitle_words_config)
+    write_json(subtitle_phrases_path, subtitle_phrases_config)
 
     print("OK")
     print(f"input: {srt_path}")
     print(f"words: {len(words)}")
     print(f"sentence subtitles: {len(sentence_items)} -> {subtitle_path}")
     print(f"word subtitles: {len(word_items)} -> {subtitle_words_path}")
+    print(f"phrase subtitles: {len(phrase_items)} -> {subtitle_phrases_path}")
     print(f"zoom events: {len(zoom_events)} -> {zoom_path}")
     print("next:")
     print("  python apply_face_zoom_v5.py --tracking data/face_tracking.json --config zoom_timeline_config.json")

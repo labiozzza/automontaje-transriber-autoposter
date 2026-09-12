@@ -93,6 +93,42 @@ h1 {
 .target-row input[type="text"], .target-row textarea { flex: 1; min-width: 180px; }
 .publish-results { margin-top: 12px; }
 .publish-results .badge { margin-right: 6px; }
+.publish-modal {
+  position: fixed; inset: 0; z-index: 1000; display: none;
+  align-items: center; justify-content: center; padding: 20px;
+  background: rgba(3, 6, 12, .82); backdrop-filter: blur(8px);
+}
+.publish-modal.active { display: flex; }
+.publish-dialog {
+  width: min(720px, 100%); max-height: calc(100vh - 40px); overflow: auto;
+  padding: 24px; border: 1px solid var(--border); border-radius: 14px;
+  background: var(--surface); box-shadow: 0 24px 80px rgba(0,0,0,.5);
+}
+.publish-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.publish-dialog-head h2 { margin: 0; font-size: 20px; }
+.publish-close { border: 0; background: transparent; color: var(--text2); font-size: 26px; cursor: pointer; }
+.publish-target-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 18px; }
+.publish-target {
+  display: flex; gap: 10px; align-items: center; padding: 11px 12px;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--surface2);
+}
+.publish-target input { accent-color: var(--accent); }
+.publish-field { margin-top: 14px; }
+.publish-field-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 6px; font-size: 12px; color: var(--text2); }
+.publish-field input, .publish-field textarea {
+  width: 100%; box-sizing: border-box; padding: 11px; color: var(--text);
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+}
+.publish-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.publish-live-progress { display: grid; gap: 9px; margin-top: 16px; }
+.publish-live-item { padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface2); }
+.publish-live-head { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; margin-bottom: 7px; }
+.publish-live-track { height: 6px; overflow: hidden; border-radius: 4px; background: rgba(255,255,255,.08); }
+.publish-live-fill { height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg,var(--accent),var(--accent2)); transition: width .3s ease; }
+.publish-live-item.done .publish-live-fill { background: var(--green); }
+.publish-live-item.error .publish-live-fill { background: var(--red); }
+.publish-live-detail { margin-top: 6px; color: var(--text2); font-size: 11px; overflow-wrap: anywhere; }
+@media (max-width: 620px) { .publish-target-grid { grid-template-columns: 1fr; } }
 
 .card {
   background: var(--surface);
@@ -433,6 +469,7 @@ select option { background: var(--surface2); }
   background: #050607;
   object-fit: contain;
 }
+.video-stage video.source-mirrored { transform: scaleX(-1); }
 
 /* CapCut-style subtitle overlay on the preview */
 .sub-drag-layer {
@@ -549,25 +586,14 @@ select option { background: var(--surface2); }
   z-index: 5;
 }
 .timeline-animation-preview.active { display: block; }
-.timeline-animation-preview::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 6px;
-  border-radius: 4px;
-  background: rgba(255,255,255,.65);
-}
 .timeline-animation-item {
   position: absolute;
   left: 0;
-  bottom: 4px;
+  bottom: 0;
   width: 36px;
   height: auto;
   transform: translateX(-50%);
 }
-.timeline-animation-fill { position:absolute;left:0;bottom:0;height:6px;border-radius:4px;background:rgba(255,255,255,.9);width:0; }
 .animation-frame-list { display:flex; gap:10px; flex-wrap:wrap; min-height:96px; padding:12px; border:1px dashed var(--border); border-radius:10px; }
 .animation-frame { width:82px; padding:6px; border:1px solid var(--border); border-radius:8px; background:var(--surface2); cursor:grab; text-align:center; }
 .animation-frame img { width:68px; height:68px; object-fit:contain; display:block; }
@@ -869,7 +895,7 @@ select option { background: var(--surface2); }
         </div>
         <div class="video-stage">
           <video id="projectPreviewVideo" playsinline controls preload="metadata"></video>
-          <div class="timeline-animation-preview" id="timelineAnimationPreview"><div class="timeline-animation-fill"></div><img class="timeline-animation-item" alt="Кадр анимации"></div>
+          <div class="timeline-animation-preview" id="timelineAnimationPreview"><img class="timeline-animation-item" alt="Кадр анимации"></div>
           <div class="sub-drag-layer">
             <div class="sub-drag-tip">X <span id="projectPreviewSubX">0.50</span> • Y <span id="projectPreviewSubY">0.78</span> • Размер <span id="projectPreviewSubScale">1.00</span></div>
             <div class="sub-card" id="projectPreviewSubCard"><span class="sub-card-text" id="projectPreviewSubText"></span></div>
@@ -923,9 +949,10 @@ select option { background: var(--surface2); }
       <div class="montage-grid">
         <div class="setting-group">
           <label>Субтитры</label>
-          <select id="montageSubtitleMode">
+          <select id="montageSubtitleMode" onchange="updatePreviewSubtitleMode()">
             <option value="sentences">По предложениям</option>
             <option value="words" selected>По словам</option>
+            <option value="phrases">По фразам (2-5 слов)</option>
           </select>
         </div>
         <div class="setting-group">
@@ -974,6 +1001,16 @@ select option { background: var(--surface2); }
         </div>
         <div class="toggle-row">
           <div>
+            <div class="toggle-label">Добавить отражение</div>
+            <div class="toggle-desc">Отразить исходное видео по горизонтали; субтитры и анимация останутся без отражения</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="montageMirrorHorizontal" onchange="updateMirrorPreview()">
+            <div class="toggle-slider"></div>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <div>
             <div class="toggle-label">Умная подсветка (BigPickle)</div>
             <div class="toggle-desc" id="montageBigpickleDesc">Цвета слов по смыслу, нужен интернет</div>
           </div>
@@ -1007,6 +1044,10 @@ select option { background: var(--surface2); }
             <option value="/Users/labiozzza/Documents/Default Project/transcriber/montage/fonts/Comfortaa.ttf">Comfortaa (встроен)</option>
             <option value="/System/Library/Fonts/Helvetica.ttc">Системный (Helvetica)</option>
           </select>
+        </div>
+        <div class="setting-group">
+          <label>Размер шрифта, px</label>
+          <input type="number" id="montageSubtitleFontSize" value="64" min="24" max="128" step="1" oninput="updateSubtitleFontSize(false)" onchange="updateSubtitleFontSize(true)">
         </div>
         <div class="setting-group">
           <label>Анимация прогресса (таймлайн)</label>
@@ -1085,19 +1126,41 @@ select option { background: var(--surface2); }
         <div id="montageTimelineInfo" style="font-size:13px;color:var(--text2)"></div>
 
         <div class="card-title" style="margin-top:20px">Публикация</div>
-        <div class="target-row">
-          <label><input type="checkbox" class="tg-target" value="instagram" checked> Instagram Reel</label>
-          <label><input type="checkbox" class="tg-target" value="trial"> Instagram Trial</label>
-          <label><input type="checkbox" class="tg-target" value="youtube"> YouTube Shorts</label>
-          <label><input type="checkbox" class="tg-target" value="threads"> Threads</label>
-          <label><input type="checkbox" class="tg-target" value="telegram"> Telegram</label>
-        </div>
-        <div class="setting-group" style="margin-bottom:10px">
-          <label>Подпись / заголовок</label>
-          <textarea id="montageCaption" rows="2" style="width:100%;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px;resize:vertical"></textarea>
-        </div>
-        <button class="btn btn-primary" id="montagePublishBtn" disabled onclick="publishMontage()">Опубликовать</button>
+        <button class="btn btn-primary" id="openPublishWindowBtn" disabled onclick="openPublishWindow()">Открыть окно публикации</button>
         <div class="publish-results" id="montagePublishResults"></div>
+      </div>
+    </div>
+
+    <div class="publish-modal" id="montagePublishModal" onclick="if(event.target===this) closePublishWindow()">
+      <div class="publish-dialog" role="dialog" aria-modal="true" aria-labelledby="publishDialogTitle">
+        <div class="publish-dialog-head">
+          <h2 id="publishDialogTitle">Публикация ролика</h2>
+          <button class="publish-close" type="button" aria-label="Закрыть" onclick="closePublishWindow()">×</button>
+        </div>
+        <div class="publish-target-grid">
+          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="instagram_trial"> Instagram пробное</label>
+          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="instagram_trial_mirrored"> Instagram пробное перевёрнутое</label>
+          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="instagram_feed"> Instagram основная лента</label>
+          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="instagram_feed_mirrored"> Instagram основная лента перевёрнутое</label>
+          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="youtube"> YouTube</label>
+          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="youtube_mirrored"> YouTube перевёрнутое</label>
+        </div>
+        <div class="publish-field">
+          <div class="publish-field-head"><label for="montagePublishTitle">Заголовок для YouTube</label><span id="montagePublishTitleCount">0 / 119</span></div>
+          <input id="montagePublishTitle" maxlength="119" placeholder="Обязателен, если выбран YouTube" oninput="updatePublishCounts()">
+        </div>
+        <div class="publish-field">
+          <div class="publish-field-head"><label for="montagePublishText">Текст для Instagram</label><span id="montagePublishTextCount">0 / 2000</span></div>
+          <textarea id="montagePublishText" maxlength="2000" rows="6" placeholder="Подпись к публикации" oninput="updatePublishCounts()"></textarea>
+        </div>
+        <div class="toggle-desc" style="margin-top:12px">Порядок Instagram: пробное → пробное перевёрнутое → основная лента → основная лента перевёрнутое. YouTube публикуется параллельно.</div>
+        <div class="error-box" id="montagePublishError"></div>
+        <div class="publish-live-progress" id="montagePublishLiveProgress"></div>
+        <div class="publish-results" id="montagePublishModalResults"></div>
+        <div class="publish-actions">
+          <button class="btn" type="button" onclick="closePublishWindow()">Отмена</button>
+          <button class="btn btn-primary" id="montagePublishBtn" onclick="publishMontage()">Начать публикацию</button>
+        </div>
       </div>
     </div>
   </div> <!-- /viewMontage -->
@@ -1445,6 +1508,7 @@ function setMontageVideo(file) {
   window.__montageObjectUrl = URL.createObjectURL(file);
   video.src = window.__montageObjectUrl;
   card.classList.add('active');
+  updateMirrorPreview();
   updateAnimationPreview();
   updateSubtitlePreviewStyle();
 }
@@ -1574,6 +1638,8 @@ function mountSubtitleOverlay(cfg) {
     if (hx) hx.value = state.x.toFixed(2);
     if (hy) hy.value = state.y.toFixed(2);
     if (hs) hs.value = state.scale.toFixed(2);
+    const fontSize = document.getElementById('montageSubtitleFontSize');
+    if (fontSize) fontSize.value = String(Math.round(64 * state.scale));
     const sel = document.getElementById('montageSubtitlePosition');
     if (sel) sel.value = 'custom';
   }
@@ -1644,6 +1710,10 @@ function mountSubtitleOverlay(cfg) {
       segments = (segs || []).slice().sort((a, b) => (a.start || 0) - (b.start || 0));
       textEl.dataset.ready = '1';
       showSegment(-1);
+    },
+    refresh() {
+      readState();
+      render();
     },
     get state() { return state; },
   };
@@ -1816,6 +1886,7 @@ async function showProjectPreview(p) {
     v.src = `/api/video/${tj}?t=${Date.now()}`;
     v.poster = `/api/thumb/${tj}?t=${Date.now()}`;
   }
+  updateMirrorPreview();
   let segs = [];
   try {
     const r = await fetch(`/api/result/${tj}`);
@@ -1823,7 +1894,9 @@ async function showProjectPreview(p) {
     segs = d.segments || [];
   } catch(e) {}
   window.__lastSegs = segs;
-  if (window.__projectOverlay) window.__projectOverlay.setSegments(segs);
+  if (window.__projectOverlay) {
+    window.__projectOverlay.setSegments(buildPreviewSubtitleSegments(segs, document.getElementById('montageSubtitleMode').value));
+  }
   const marks = [];
   for (const s of segs) {
     marks.push({ time: s.start });
@@ -1878,13 +1951,11 @@ function syncAnimationPreview() {
   const preview = document.getElementById('timelineAnimationPreview');
   const video = document.getElementById('projectPreviewVideo');
   const item = preview?.querySelector('.timeline-animation-item');
-  const fill = preview?.querySelector('.timeline-animation-fill');
-  if (!preview?.classList.contains('active') || !item || !fill) return;
+  if (!preview?.classList.contains('active') || !item) return;
   const start = Math.max(0, Number(document.getElementById('montageAnimationStart').value) || 0);
   const duration = Number(video.duration) || 6;
   const time = Number(video.currentTime) || 0;
   const rel = Math.max(0, Math.min(1, (time - start) / Math.max(.001, duration - start)));
-  fill.style.width = `${rel * 100}%`;
   item.style.left = `${rel * 100}%`;
   item.style.display = time >= start && animationPreviewData.frames.length ? 'block' : 'none';
   if (animationPreviewData.frames.length) {
@@ -1914,6 +1985,74 @@ function updateSubtitlePreviewStyle() {
   card.style.fontFamily = font.options[font.selectedIndex]?.text.includes('Системный')
     ? '-apple-system, BlinkMacSystemFont, sans-serif'
     : 'ComfortaaPreview, sans-serif';
+}
+
+function updateSubtitleFontSize(finalize = false) {
+  const input = document.getElementById('montageSubtitleFontSize');
+  const scale = document.getElementById('montageSubtitleScale');
+  if (!input || !scale) return;
+  if (input.value === '') {
+    if (!finalize) return;
+    input.value = '64';
+  }
+  const raw = Number(input.value);
+  if (!Number.isFinite(raw)) return;
+  if (!finalize && (raw < 24 || raw > 128)) return;
+  const size = Math.max(24, Math.min(128, raw));
+  if (finalize) input.value = String(Math.round(size));
+  scale.value = (size / 64).toFixed(3);
+  if (window.__projectOverlay) window.__projectOverlay.refresh();
+}
+
+function buildPreviewSubtitleSegments(segments, mode) {
+  if (mode === 'sentences') return segments || [];
+  const words = [];
+  for (const segment of segments || []) {
+    if (Array.isArray(segment.words) && segment.words.length) {
+      for (const word of segment.words) {
+        const text = String(word.word || word.text || '').trim();
+        if (text) words.push({start:Number(word.start)||0,end:Number(word.end)||0,text});
+      }
+      continue;
+    }
+    const parts = String(segment.text || '').trim().split(/\s+/).filter(Boolean);
+    const start = Number(segment.start) || 0;
+    const duration = Math.max(.001, (Number(segment.end) || 0) - start);
+    parts.forEach((text, index) => words.push({
+      start:start + duration * index / parts.length,
+      end:start + duration * (index + 1) / parts.length,
+      text,
+    }));
+  }
+  if (mode === 'words') return words;
+  const phrases = [];
+  for (let index = 0; index < words.length;) {
+    const remaining = words.length - index;
+    let size = Math.min(5, remaining);
+    if (remaining - size === 1) size -= 1;
+    if (size <= 1 && phrases.length) {
+      const last = phrases[phrases.length - 1];
+      last.end = words[index].end;
+      last.text += ' ' + words[index].text;
+      break;
+    }
+    const group = words.slice(index, index + Math.max(1, size));
+    phrases.push({start:group[0].start,end:group[group.length - 1].end,text:group.map(word => word.text).join(' ')});
+    index += Math.max(1, size);
+  }
+  return phrases;
+}
+
+function updatePreviewSubtitleMode() {
+  if (!window.__projectOverlay) return;
+  const mode = document.getElementById('montageSubtitleMode').value;
+  window.__projectOverlay.setSegments(buildPreviewSubtitleSegments(window.__lastSegs || [], mode));
+}
+
+function updateMirrorPreview() {
+  const video = document.getElementById('projectPreviewVideo');
+  const toggle = document.getElementById('montageMirrorHorizontal');
+  if (video && toggle) video.classList.toggle('source-mirrored', toggle.checked);
 }
 
 let animationBuilderFrames = [];
@@ -2061,6 +2200,7 @@ async function startMontage() {
   form.append('edge_mode', document.getElementById('montageEdgeMode').value);
   form.append('face_tracking', document.getElementById('montageFaceTrack').checked);
   form.append('autozoom', document.getElementById('montageAutozoom').checked);
+  form.append('mirror_horizontal', document.getElementById('montageMirrorHorizontal').checked);
   form.append('subtitles', true);
   form.append('bigpickle', document.getElementById('montageBigpickle').checked);
 
@@ -2069,7 +2209,7 @@ async function startMontage() {
     form.append('animation_id', animId);
     form.append('animation_start', document.getElementById('montageAnimationStart').value || 0);
     form.append('animation_offset_x', document.getElementById('montageAnimationOffset').value || 0);
-    form.append('animation_bar', true);
+    form.append('animation_bar', false);
   }
   if (document.getElementById('montageZoomOverride').checked) {
     const raw = document.getElementById('montageZoomTimeline').value.trim();
@@ -2151,8 +2291,10 @@ async function refreshMontageResult() {
       return;
     }
     if (data.result) {
-      clearInterval(montagePollTimer);
-      montagePollTimer = null;
+      if (data.status !== 'publishing') {
+        clearInterval(montagePollTimer);
+        montagePollTimer = null;
+      }
       localStorage.removeItem('montageJobId');
       document.getElementById('montageResultsCard').classList.add('active');
       const info = document.getElementById('montageResultInfo');
@@ -2167,9 +2309,9 @@ async function refreshMontageResult() {
       document.getElementById('montageVideoStage').style.display = '';
       document.getElementById('montageVideoTimebar').style.display = '';
       document.getElementById('montageVideoKeybar').style.display = '';
-      document.getElementById('montagePublishBtn').disabled = false;
+      document.getElementById('openPublishWindowBtn').disabled = false;
 
-      document.getElementById('montagePublishBtn').disabled = false;
+      document.getElementById('openPublishWindowBtn').disabled = false;
 
       if (window.__projectOverlay) window.__projectOverlay.setSegments(window.__lastSegs || []);
 
@@ -2218,16 +2360,27 @@ async function refreshMontageResult() {
         tlBox.textContent = 'Нет данных о таймлайне';
       }
     }
+    if (data.publish_progress) renderPublishProgress(data.publish_progress);
     if (data.publish) {
       const box = document.getElementById('montagePublishResults');
+      const modalBox = document.getElementById('montagePublishModalResults');
       box.innerHTML = '';
+      modalBox.innerHTML = '';
       for (const [kind, r] of Object.entries(data.publish)) {
         const url = r.permalink || (r.watch_url || r.shorts_url) || r.thread_id || `message_id=${r.message_id}`;
-        if (url) box.innerHTML += `<div><span class="badge ok">${r.kind || kind}: OK</span> <a href="${url}" target="_blank" style="color:var(--accent2)">${url}</a></div>`;
-        else box.innerHTML += `<div><span class="badge ok">${r.kind || kind}: OK</span></div>`;
+        const row = url
+          ? `<div><span class="badge ok">${esc(r.kind || kind)}: OK</span> <a href="${esc(url)}" target="_blank" style="color:var(--accent2)">${esc(url)}</a></div>`
+          : `<div><span class="badge ok">${esc(r.kind || kind)}: OK</span></div>`;
+        box.innerHTML += row;
+        modalBox.innerHTML += row;
+      }
+      for (const [kind, message] of Object.entries(data.publish_errors || {})) {
+        const row = `<div><span class="badge no">${esc(kind)}: ошибка</span> ${esc(message)}</div>`;
+        box.innerHTML += row;
+        modalBox.innerHTML += row;
       }
       document.getElementById('montagePublishBtn').disabled = true;
-      document.getElementById('montagePublishBtn').textContent = 'Опубликовано';
+      document.getElementById('montagePublishBtn').textContent = Object.keys(data.publish_errors || {}).length ? 'Завершено с ошибками' : 'Опубликовано';
     }
   } catch(e) {
     montageError('Не удалось получить результат: ' + e.message);
@@ -2267,36 +2420,83 @@ async function shareMontage() {
 }
 
 async function publishMontage() {
-  const targets = [];
-  document.querySelectorAll('.tg-target:checked').forEach(cb => targets.push(cb.value));
+  const targets = [...document.querySelectorAll('.publish-target-checkbox:checked')].map(cb => cb.value);
   if (!targets.length) {
-    montageError('Выберите хотя бы одну цель публикации');
+    publishWindowError('Выберите хотя бы одну цель публикации');
     return;
   }
-  const text = document.getElementById('montageCaption').value.trim();
-  const targetsJson = targets.map(kind => {
-    const t = { kind };
-    if (text) { t.text = text; t.caption = text; t.title = text; }
-    return t;
-  });
+  const title = document.getElementById('montagePublishTitle').value.trim();
+  const text = document.getElementById('montagePublishText').value.trim();
+  if (targets.some(target => target.startsWith('youtube')) && !title) {
+    publishWindowError('Для YouTube укажите заголовок');
+    return;
+  }
   const form = new FormData();
-  form.append('targets_json', JSON.stringify(targetsJson));
+  form.append('targets_json', JSON.stringify(targets));
+  form.append('title', title);
+  form.append('text', text);
   document.getElementById('montagePublishBtn').disabled = true;
+  document.getElementById('montagePublishBtn').textContent = 'Публикация...';
+  document.getElementById('montagePublishError').classList.remove('active');
+  const initialProgress = {};
+  for (const checkbox of document.querySelectorAll('.publish-target-checkbox:checked')) {
+    initialProgress[checkbox.value] = {label:checkbox.parentElement.textContent.trim(),progress:0,status:'queued',detail:'В очереди'};
+  }
+  renderPublishProgress(initialProgress);
   document.getElementById('montageErrorBox').classList.remove('active');
-  document.getElementById('montageResultsCard').classList.remove('active');
   try {
     const res = await fetch(`/api/montage/${montageJobId}/publish`, { method: 'POST', body: form });
     const data = await res.json();
     if (!res.ok) {
-      montageError(data.detail || 'Ошибка публикации');
+      publishWindowError(data.detail || 'Ошибка публикации');
       document.getElementById('montagePublishBtn').disabled = false;
+      document.getElementById('montagePublishBtn').textContent = 'Начать публикацию';
       return;
     }
     connectMontageWs();
+    startMontagePolling();
   } catch(e) {
-    montageError('Ошибка публикации: ' + e.message);
+    publishWindowError('Ошибка публикации: ' + e.message);
     document.getElementById('montagePublishBtn').disabled = false;
+    document.getElementById('montagePublishBtn').textContent = 'Начать публикацию';
   }
+}
+
+function openPublishWindow() {
+  document.getElementById('montagePublishModal').classList.add('active');
+  document.body.style.overflow = 'hidden';
+  updatePublishCounts();
+}
+
+function closePublishWindow() {
+  document.getElementById('montagePublishModal').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function updatePublishCounts() {
+  const title = document.getElementById('montagePublishTitle');
+  const text = document.getElementById('montagePublishText');
+  document.getElementById('montagePublishTitleCount').textContent = `${title.value.length} / 119`;
+  document.getElementById('montagePublishTextCount').textContent = `${text.value.length} / 2000`;
+}
+
+function renderPublishProgress(items) {
+  const container = document.getElementById('montagePublishLiveProgress');
+  const statusNames = {queued:'В очереди',preparing:'Подготовка',publishing:'Публикация',done:'Готово',error:'Ошибка'};
+  container.innerHTML = Object.entries(items || {}).map(([id, item]) => {
+    const progress = Math.max(0, Math.min(100, Number(item.progress) || 0));
+    return `<div class="publish-live-item ${esc(item.status || 'queued')}" data-target="${esc(id)}">
+      <div class="publish-live-head"><strong>${esc(item.label || id)}</strong><span>${esc(statusNames[item.status] || item.status)} · ${progress.toFixed(0)}%</span></div>
+      <div class="publish-live-track"><div class="publish-live-fill" style="width:${progress}%"></div></div>
+      <div class="publish-live-detail">${esc(item.detail || '')}</div>
+    </div>`;
+  }).join('');
+}
+
+function publishWindowError(message) {
+  const box = document.getElementById('montagePublishError');
+  box.textContent = message;
+  box.classList.add('active');
 }
 
 if ('serviceWorker' in navigator) {

@@ -1,4 +1,4 @@
-import os, json, uuid, asyncio, subprocess, time, re, tempfile, hashlib, urllib.request, importlib, threading
+import os, json, uuid, asyncio, subprocess, time, re, tempfile, hashlib, urllib.request, importlib, threading, gc
 import shutil
 import traceback
 from pathlib import Path
@@ -44,6 +44,13 @@ jobs = {}
 job_queues = {}
 whisper_models = {}
 WHISPER_PROGRESS_LOCK = threading.Lock()
+WHISPER_JOB_LOCK = threading.RLock()
+DIARIZATION_JOB_LOCK = threading.RLock()
+MODEL_IDLE_SECONDS = 300
+whisper_last_used = 0.0
+diarization_last_used = 0.0
+whisper_idle_timer = None
+diarization_idle_timer = None
 diarization_pipeline = None
 PROJECTS = {}
 PROJECTS_LOCK = asyncio.Lock()
@@ -105,6 +112,11 @@ def ensure_whisper_model(root: str, name: str, progress_cb=None) -> Optional[str
 
 def load_whisper_model(name: str, progress_cb=None, load_cb=None):
     if name not in whisper_models:
+        if whisper_models:
+            loaded = ", ".join(whisper_models)
+            print(f"[transcriber] Unloading Whisper model(s): {loaded}")
+            whisper_models.clear()
+            gc.collect()
         print(f"[transcriber] Checking whisper model '{name}'...")
         root = os.path.expanduser("~/.cache/whisper")
         path = ensure_whisper_model(root, name, progress_cb)
@@ -114,6 +126,92 @@ def load_whisper_model(name: str, progress_cb=None, load_cb=None):
         whisper_models[name] = whisper.load_model(path or name, device=DEVICE)
         print(f"[transcriber] Whisper '{name}' loaded on {DEVICE}")
     return whisper_models[name]
+
+
+def run_whisper_job(name, audio_path, model_progress, model_load_start, transcription_start, transcription_progress, **kwargs):
+    global whisper_last_used
+    with WHISPER_JOB_LOCK:
+        _cancel_idle_timer("whisper")
+        model = load_whisper_model(name, model_progress, model_load_start)
+        transcription_start()
+        try:
+            return transcribe_with_progress(model, audio_path, transcription_progress, **kwargs)
+        finally:
+            whisper_last_used = time.monotonic()
+            _schedule_idle_unload("whisper")
+
+
+def unload_whisper_models() -> None:
+    global whisper_last_used
+    with WHISPER_JOB_LOCK:
+        _cancel_idle_timer("whisper")
+        if whisper_models:
+            loaded = ", ".join(whisper_models)
+            print(f"[transcriber] Unloading Whisper model(s): {loaded}")
+            whisper_models.clear()
+            gc.collect()
+        whisper_last_used = 0.0
+
+
+def unload_diarization_pipeline() -> None:
+    global diarization_pipeline, diarization_last_used
+    with DIARIZATION_JOB_LOCK:
+        _cancel_idle_timer("diarization")
+        if diarization_pipeline is not None:
+            print("[transcriber] Unloading pyannote diarization pipeline")
+            diarization_pipeline = None
+            gc.collect()
+        diarization_last_used = 0.0
+
+
+def _cancel_idle_timer(kind: str) -> None:
+    global whisper_idle_timer, diarization_idle_timer
+    timer = whisper_idle_timer if kind == "whisper" else diarization_idle_timer
+    if timer is not None:
+        timer.cancel()
+    if kind == "whisper":
+        whisper_idle_timer = None
+    else:
+        diarization_idle_timer = None
+
+
+def _schedule_idle_unload(kind: str, delay: float = MODEL_IDLE_SECONDS) -> None:
+    global whisper_idle_timer, diarization_idle_timer
+    _cancel_idle_timer(kind)
+    timer = threading.Timer(delay, _unload_if_idle, args=(kind,))
+    timer.daemon = True
+    if kind == "whisper":
+        whisper_idle_timer = timer
+    else:
+        diarization_idle_timer = timer
+    timer.start()
+
+
+def _unload_if_idle(kind: str) -> None:
+    lock = WHISPER_JOB_LOCK if kind == "whisper" else DIARIZATION_JOB_LOCK
+    with lock:
+        last_used = whisper_last_used if kind == "whisper" else diarization_last_used
+        remaining = MODEL_IDLE_SECONDS - (time.monotonic() - last_used)
+        if last_used and remaining > 0:
+            _schedule_idle_unload(kind, remaining)
+            return
+        if kind == "whisper":
+            unload_whisper_models()
+        else:
+            unload_diarization_pipeline()
+
+
+def run_diarization_job(audio_path: str, kwargs: dict, start_cb):
+    global diarization_last_used
+    with DIARIZATION_JOB_LOCK:
+        _cancel_idle_timer("diarization")
+        pipeline = load_diarization_pipeline()
+        start_cb()
+        try:
+            return pipeline(audio_path, **kwargs)
+        finally:
+            diarization_last_used = time.monotonic()
+            _schedule_idle_unload("diarization")
 
 
 def transcribe_with_progress(model, audio_path: str, progress_cb, **kwargs):
@@ -247,11 +345,13 @@ async def process_job(job_id: str, params: dict):
             )
 
         await broadcast_progress(job_id, 20, "model", f"Проверка модели {model_name}...")
-        wm = await asyncio.to_thread(load_whisper_model, model_name, model_progress, model_load_start)
-
-        await broadcast_progress(job_id, 50, "transcription", "Транскрибация аудио...")
-
         transcription_span = 12 if params.get("diarization", False) else 38
+
+        def transcription_start():
+            asyncio.run_coroutine_threadsafe(
+                broadcast_progress(job_id, 50, "transcription", "Транскрибация аудио..."),
+                loop,
+            )
 
         def transcription_progress(ratio: float):
             pct = 50 + ratio * transcription_span
@@ -261,7 +361,8 @@ async def process_job(job_id: str, params: dict):
             )
 
         result = await asyncio.to_thread(
-            transcribe_with_progress, wm, wav_output, transcription_progress,
+            run_whisper_job, model_name, wav_output, model_progress, model_load_start,
+            transcription_start, transcription_progress,
             language=language, word_timestamps=(mode == "words")
         )
         segments = result["segments"]
@@ -276,14 +377,19 @@ async def process_job(job_id: str, params: dict):
 
         if do_diarization:
             await broadcast_progress(job_id, 65, "diarization", "Загрузка модели диаризации...")
-            dp = await asyncio.to_thread(load_diarization_pipeline)
-
-            await broadcast_progress(job_id, 70, "diarization", "Диаризация...")
             diarization_kwargs = {}
             if num_speakers:
                 diarization_kwargs["num_speakers"] = int(num_speakers)
 
-            diarization = await asyncio.to_thread(dp, wav_output, **diarization_kwargs)
+            def diarization_start():
+                asyncio.run_coroutine_threadsafe(
+                    broadcast_progress(job_id, 70, "diarization", "Диаризация..."),
+                    loop,
+                )
+
+            diarization = await asyncio.to_thread(
+                run_diarization_job, wav_output, diarization_kwargs, diarization_start
+            )
             await broadcast_progress(job_id, 85, "diarization", "Диаризация завершена")
 
         # Stage 4: Merge
@@ -727,8 +833,9 @@ async def export_file(
 MONTAGE_WORK = BASE_DIR / "montage_work"
 MONTAGE_WORK.mkdir(exist_ok=True)
 
-from montage import engine as montage_engine
 from montage.secrets_env import load_secrets_env
+load_secrets_env()
+from montage import engine as montage_engine
 
 app.mount("/animation-assets", StaticFiles(directory=str(montage_engine.ANIMATIONS_DIR)), name="animation-assets")
 app.mount("/font-assets", StaticFiles(directory=str(montage_engine.FONTS_DIR)), name="font-assets")
@@ -816,18 +923,80 @@ async def process_publish(job_id: str, targets: list):
     loop = asyncio.get_running_loop()
     try:
         job["status"] = "publishing"
+        job["error"] = None
+        job["publish"] = None
+        job["publish_errors"] = None
+        job["publish_progress"] = {
+            str(target["id"]): {
+                "label": str(target.get("label") or target["id"]),
+                "progress": 0,
+                "status": "queued",
+                "detail": "В очереди",
+            }
+            for target in targets
+        }
         progress = _threaded_progress(loop, job_id)
         workdir = MONTAGE_WORK / job_id
         source_video = Path(job["result"]["result_video"])
+        mirrored_source_video = None
+
+        if any(bool(target.get("mirrored")) for target in targets):
+            try:
+                for target in targets:
+                    if target.get("mirrored"):
+                        job["publish_progress"][target["id"]].update(
+                            status="preparing", detail="Подготовка отражённой версии"
+                        )
+                await _montage_announce(job_id, "Подготовка отражённой версии...")
+                alternate_options = dict(job.get("params") or {})
+                alternate_options["mirror_horizontal"] = not bool(alternate_options.get("mirror_horizontal"))
+
+                def alternate_progress(percent: float, stage: str, detail: str) -> None:
+                    progress(min(20, percent * 0.2), f"mirror_{stage}", detail)
+
+                alternate = await asyncio.to_thread(
+                    montage_engine.render_montage,
+                    job_id=f"{job_id}_mirror",
+                    workdir=workdir / "publish_mirrored",
+                    source_video=Path(job["video_path"]),
+                    srt_text=job["srt_text"],
+                    options=alternate_options,
+                    progress_cb=alternate_progress,
+                    log_cb=lambda message: asyncio.run_coroutine_threadsafe(
+                        _montage_announce(job_id, f"mirror: {message}"), loop
+                    ),
+                )
+                mirrored_source_video = Path(alternate["result_video"])
+                for target in targets:
+                    if target.get("mirrored"):
+                        job["publish_progress"][target["id"]].update(
+                            status="queued", detail="Отражённая версия готова"
+                        )
+            except Exception as exc:
+                await _montage_announce(job_id, f"Отражённая версия не подготовлена: {exc}")
 
         await _montage_announce(job_id, "Публикация...")
+
+        def publish_progress(percent: float, stage: str, detail: str) -> None:
+            offset = 20 if mirrored_source_video else 0
+            progress(offset + percent * (100 - offset) / 100, stage, detail)
+
+        def target_progress(target_id: str, percent: float, detail: str, status: str) -> None:
+            def update() -> None:
+                item = job["publish_progress"].get(target_id)
+                if item is not None:
+                    item.update(progress=round(percent, 1), detail=detail, status=status)
+            loop.call_soon_threadsafe(update)
+
         result = await asyncio.to_thread(
             montage_engine.publish_job,
             job_id=job_id,
             workdir=workdir,
             source_video=source_video,
+            mirrored_source_video=mirrored_source_video,
             targets=targets,
-            progress_cb=progress,
+            progress_cb=publish_progress,
+            target_progress_cb=target_progress,
             log_cb=lambda message: asyncio.run_coroutine_threadsafe(
                 _montage_announce(job_id, message), loop
             ),
@@ -835,9 +1004,11 @@ async def process_publish(job_id: str, targets: list):
         job["status"] = "done"
         job["progress"] = 100
         job["stage"] = "published"
-        job["detail"] = "Опубликовано"
         job["publish"] = result["results"]
-        await broadcast_progress(job_id, 100, "published", "Публикация завершена")
+        job["publish_errors"] = result.get("errors") or {}
+        detail = "Публикация завершена" if not job["publish_errors"] else "Публикация завершена с ошибками"
+        job["detail"] = detail
+        await broadcast_progress(job_id, 100, "published", detail)
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
@@ -914,6 +1085,7 @@ async def start_montage(
     subtitle_font: Optional[str] = Form(None),
     face_tracking: bool = Form(False),
     autozoom: bool = Form(False),
+    mirror_horizontal: bool = Form(False),
     subtitles: bool = Form(True),
     bigpickle: bool = Form(True),
     edge_mode: str = Form("scale"),
@@ -921,7 +1093,7 @@ async def start_montage(
     animation_start: float = Form(0.0),
     animation_offset_x: int = Form(0),
     animation_item_size: int = Form(72),
-    animation_bar: bool = Form(True),
+    animation_bar: bool = Form(False),
     zoom_timeline_json: Optional[str] = Form(None),
 ):
     job_id = str(uuid.uuid4())[:8]
@@ -1000,6 +1172,7 @@ async def start_montage(
         "subtitle_font": subtitle_font,
         "face_tracking": face_tracking,
         "autozoom": autozoom,
+        "mirror_horizontal": mirror_horizontal,
         "subtitles": subtitles,
         "bigpickle": bigpickle,
         "edge_mode": edge_mode,
@@ -1035,6 +1208,8 @@ async def start_montage(
 async def publish_montage(
     job_id: str,
     targets_json: str = Form(...),
+    title: str = Form(""),
+    text: str = Form(""),
 ):
     if job_id not in jobs or jobs[job_id].get("kind") != "montage":
         raise HTTPException(404, "Montage job not found")
@@ -1042,11 +1217,39 @@ async def publish_montage(
     if job["status"] != "done" or not job.get("result"):
         raise HTTPException(400, "Сначала завершите рендер")
     try:
-        targets = json.loads(targets_json)
+        requested_targets = json.loads(targets_json)
     except json.JSONDecodeError:
         raise HTTPException(400, "targets_json must be valid JSON")
-    if not isinstance(targets, list) or not targets:
+    if not isinstance(requested_targets, list) or not requested_targets:
         raise HTTPException(400, "Список целей пуст")
+    if len(title) > 119:
+        raise HTTPException(400, "Заголовок должен быть не длиннее 119 символов")
+    if len(text) > 2000:
+        raise HTTPException(400, "Текст должен быть не длиннее 2000 символов")
+    target_specs = {
+        "instagram_trial": ("trial", False, "Instagram пробное"),
+        "instagram_trial_mirrored": ("trial", True, "Instagram пробное перевёрнутое"),
+        "instagram_feed": ("instagram", False, "Instagram основная лента"),
+        "instagram_feed_mirrored": ("instagram", True, "Instagram основная лента перевёрнутое"),
+        "youtube": ("youtube", False, "YouTube"),
+        "youtube_mirrored": ("youtube", True, "YouTube перевёрнутое"),
+    }
+    target_ids = list(dict.fromkeys(str(item) for item in requested_targets))
+    unknown = [target_id for target_id in target_ids if target_id not in target_specs]
+    if unknown:
+        raise HTTPException(400, f"Неизвестные цели публикации: {', '.join(unknown)}")
+    if any(target_id.startswith("youtube") for target_id in target_ids) and not title.strip():
+        raise HTTPException(400, "Для YouTube укажите заголовок")
+    targets = []
+    for target_id in target_ids:
+        kind, mirrored, label = target_specs[target_id]
+        target = {"id": target_id, "kind": kind, "mirrored": mirrored, "label": label}
+        if kind == "youtube":
+            target["title"] = title.strip()
+        else:
+            target["text"] = text.strip()
+            target["caption"] = text.strip()
+        targets.append(target)
     asyncio.create_task(process_publish(job_id, targets))
     return {"job_id": job_id, "status": "publishing", "targets": [t.get("kind") for t in targets]}
 
@@ -1065,6 +1268,8 @@ async def montage_result(job_id: str):
         "error": job.get("error"),
         "result": job.get("result"),
         "publish": job.get("publish"),
+        "publish_errors": job.get("publish_errors"),
+        "publish_progress": job.get("publish_progress"),
     }
 
 

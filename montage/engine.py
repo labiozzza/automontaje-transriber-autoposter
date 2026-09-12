@@ -6,9 +6,11 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
@@ -311,6 +313,23 @@ def render_montage(
             # Portrait iPhone .mov without explicit rotation tag: keep as-is (no rotation -> already upright)
             pass
 
+    do_mirror = bool(options.get("mirror_horizontal", False))
+    if do_mirror:
+        progress_cb(4, "mirror", "Отражение исходного видео по горизонтали...")
+        mirrored_source = workdir / "mirrored_source.mp4"
+        mirror_cmd = [
+            shutil.which("ffmpeg") or "ffmpeg", "-y", "-i", str(source_video),
+            "-map", "0:v:0", "-map", "0:a:0?", "-vf", "hflip",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "0", "-pix_fmt", "yuv420p",
+            "-c:a", "copy", "-metadata:s:v:0", "rotate=0", "-movflags", "+faststart",
+            str(mirrored_source),
+        ]
+        code = run_cmd(mirror_cmd, cwd=workdir, log_path=workdir / "mirror.log", timeout=1800)
+        if code != 0 or not mirrored_source.exists():
+            raise RuntimeError("Не удалось отразить исходное видео")
+        source_video = mirrored_source
+        progress_cb(5, "mirror", "Исходное видео отражено")
+
     subtitle_mode = str(options.get("subtitle_mode") or "words")
     subtitle_position = str(options.get("subtitle_position") or "custom")
     animation_cfg = options.get("animation") or {}
@@ -341,6 +360,7 @@ def render_montage(
         "zoom_timeline_config.json": str(zoom_out),
         "subtitle_timeline_config.json": str(workdir / "sub_sentences.mp4"),
         "subtitle_timeline_config_words.json": str(workdir / "sub_words.mp4"),
+        "subtitle_timeline_config_phrases.json": str(workdir / "sub_phrases.mp4"),
     }
     for config_name, out_mp4 in output_for.items():
         config_path = workdir / config_name
@@ -456,6 +476,7 @@ def render_montage(
         configs = {
             "sentences": ("subtitle_timeline_config.json", "sub_sentences.mp4"),
             "words": ("subtitle_timeline_config_words.json", "sub_words.mp4"),
+            "phrases": ("subtitle_timeline_config_phrases.json", "sub_phrases.mp4"),
         }
         config_name, out_name = configs.get(subtitle_mode, configs["sentences"])
         out_mp4 = workdir / out_name
@@ -508,7 +529,7 @@ def render_montage(
             "--start", str(anim_start),
             "--offset-x", str(int(animation_cfg.get("offset_x") or 0)),
             "--item-size", str(int(animation_cfg.get("item_size") or 72)),
-            "--bar", "1" if animation_cfg.get("bar", True) else "0",
+            "--bar", "0",
         ]
 
         def anim_line(line: str) -> None:
@@ -584,6 +605,7 @@ def render_montage(
         "subtitle_mode": subtitle_mode,
         "face_tracking": do_face_track,
         "autozoom": do_zoom,
+        "mirror_horizontal": do_mirror,
         "subtitles": do_subtitles,
         "bigpickle": use_bigpickle,
         "animations": list(animation_ids()),
@@ -646,11 +668,12 @@ def _transcode_to_fit(source: Path, output: Path, target_bytes: int, duration: f
     raise RuntimeError("cannot fit file under target size")
 
 
-def publish_job(
+def _publish_targets(
     *,
     job_id: str,
     workdir: Path,
     source_video: Path,
+    mirrored_source_video: Path | None,
     targets: list[dict[str, Any]],
     progress_cb: Callable[[float, str, str], None],
     log_cb: Callable[[str], None],
@@ -666,8 +689,12 @@ def publish_job(
     for index, target in enumerate(targets):
         kind = str(target.get("kind") or "")
         label = str(target.get("label") or kind)
-        base = 10 + index * 80 / max(1, len(targets))
-        span = 80 / max(1, len(targets))
+        base = index * 100 / max(1, len(targets))
+        span = 100 / max(1, len(targets))
+        result_key = str(target.get("id") or kind)
+        target_source = mirrored_source_video if bool(target.get("mirrored")) else source_video
+        if target_source is None or not Path(target_source).exists():
+            raise RuntimeError(f"Не подготовлена видео-версия для цели: {label}")
 
         def sub_progress(p: float, detail: str) -> None:
             progress_cb(min(99, base + span * p / 100), kind, detail)
@@ -677,6 +704,10 @@ def publish_job(
 
         if kind in {"instagram", "trial"}:
             if not sw["instagram_ready"]:
+                if not sw.get("github_ready"):
+                    raise RuntimeError(
+                        "Instagram: для загрузки видео в GitHub Raw не задан GITHUB_TOKEN"
+                    )
                 raise RuntimeError("Instagram: не настроен INSTAGRAM_ACCESS_TOKEN / IG_USER_ID")
             from .instagram_publisher import InstagramPublisher
             instagram = InstagramPublisher(
@@ -684,19 +715,22 @@ def publish_job(
                 workdir / "publish.log", log_cb,
             )
             variant = "trial" if kind == "trial" else "normal"
-            staged = instagram.prepare_variant(source_video, workdir / "staging", job_id, variant, lambda p, d: sub_progress(p, d))
+            staged = instagram.prepare_variant(
+                target_source, workdir / "staging", job_id, variant,
+                lambda p, d: sub_progress(p * 0.2, d),
+            )
             graph_ip, raw_ip = instagram.resolve_hosts()
-            sub_progress(35, "Загрузка в GitHub Raw...")
+            sub_progress(25, "Загрузка в GitHub Raw...")
             _, raw_url = instagram.upload_to_github(staged)
             time.sleep(3)
-            instagram.verify_public_video(raw_url, raw_ip, sub_progress)
+            instagram.verify_public_video(raw_url, raw_ip, lambda p, d: sub_progress(25 + p * 0.2, d))
             caption = str(target.get("caption") or target.get("text") or "")
             container = instagram.create_container(variant, graph_ip, raw_url, caption)
-            instagram.wait_container(variant, graph_ip, container, sub_progress)
+            instagram.wait_container(variant, graph_ip, container, lambda p, d: sub_progress(45 + p * 0.5, d))
             media_id = instagram.publish_container(variant, graph_ip, container)
             info = instagram.media_info(variant, graph_ip, media_id)
             permalink = str(info.get("permalink") or "")
-            results[kind] = {"media_id": media_id, "permalink": permalink, "kind": label}
+            results[result_key] = {"media_id": media_id, "permalink": permalink, "kind": label}
             progress_cb(base + span, kind, f"Instagram готов: {permalink or media_id}")
 
         elif kind == "youtube":
@@ -705,18 +739,28 @@ def publish_job(
             from .youtube_publisher import YouTubePublisher
             youtube = YouTubePublisher(INSTAPOSTER_DIR, Path(sys.executable), workdir / "youtube.log")
             youtube.check_auth()
+            youtube_source = workdir / "youtube_staging" / f"{result_key}.mp4"
+            youtube.prepare_video(
+                target_source,
+                youtube_source,
+                lambda p, detail: sub_progress(p * 0.25, detail),
+            )
             title = str(target.get("title") or target.get("text") or "Мой ролик")
             upload_ready_called: list[bool] = [False]
             def upload_ready() -> None:
                 upload_ready_called[0] = True
             def yt_progress(p: float, detail: str) -> None:
-                sub_progress(p, detail)
-            info = youtube.upload(source_video, title, yt_progress, upload_ready)
-            results[kind] = {"video_id": info["video_id"], "shorts_url": info["shorts_url"], "watch_url": info["watch_url"], "kind": label}
+                sub_progress(25 + p * 0.75, detail)
+            info = youtube.upload(youtube_source, title, yt_progress, upload_ready)
+            results[result_key] = {"video_id": info["video_id"], "shorts_url": info["shorts_url"], "watch_url": info["watch_url"], "kind": label}
             progress_cb(base + span, kind, f"YouTube готов: {info['shorts_url']}")
 
         elif kind == "threads":
             if not sw["threads_ready"]:
+                if not sw.get("github_ready"):
+                    raise RuntimeError(
+                        "Threads: для загрузки видео в GitHub Raw не задан GITHUB_TOKEN"
+                    )
                 raise RuntimeError("Threads: не настроен THREADS_ACCESS_TOKEN / THREADS_USER_ID")
             from .instagram_publisher import InstagramPublisher
             instagram = InstagramPublisher(
@@ -724,7 +768,7 @@ def publish_job(
                 workdir / "publish.log", log_cb,
             )
             sub_progress(10, "Подготовка видео для GitHub...")
-            staged = instagram.prepare_variant(source_video, workdir / "staging", job_id, "threads", lambda p, d: sub_progress(p, d))
+            staged = instagram.prepare_variant(target_source, workdir / "staging", job_id, "threads", lambda p, d: sub_progress(p, d))
             graph_ip = threads_mod.resolve_host_via_doh(threads_mod.THREADS_HOST)
             raw_ip = threads_mod.resolve_host_via_doh(threads_mod.RAW_HOST)
             sub_progress(35, "Загрузка в GitHub Raw...")
@@ -749,7 +793,7 @@ def publish_job(
             thread_id = str(published["id"])
             info = threads_mod.get_thread_info(graph_ip, thread_id)
             permalink = str(info.get("permalink") or "")
-            results[kind] = {"thread_id": thread_id, "permalink": permalink, "kind": label}
+            results[result_key] = {"thread_id": thread_id, "permalink": permalink, "kind": label}
             progress_cb(base + span, kind, f"Threads готов: {permalink or thread_id}")
 
         elif kind == "telegram":
@@ -759,12 +803,12 @@ def publish_job(
                 raise RuntimeError("Telegram: не настроен TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID")
             duration = 0.0
             try:
-                duration = float(ffprobe(source_video).get("format", {}).get("duration") or 0) or 30.0
+                duration = float(ffprobe(target_source).get("format", {}).get("duration") or 0) or 30.0
             except Exception:
                 duration = 30.0
             tg_file = workdir / f"{job_id}_tg.mp4"
             sub_progress(15, "Подготовка файла до 45 MB для Telegram...")
-            _transcode_to_fit(source_video, tg_file, 45 * 1024 * 1024, duration, sub_progress)
+            _transcode_to_fit(target_source, tg_file, 45 * 1024 * 1024, duration, sub_progress)
             caption = str(target.get("caption") or target.get("text") or "")
             curl = shutil.which("curl") or "curl"
             cmd = [curl, "-sS", "-X", "POST",
@@ -784,10 +828,93 @@ def publish_job(
                 raise RuntimeError(f"Telegram error: {json.dumps(data, ensure_ascii=False)[:400]}")
             result = data.get("result", {}) or {}
             message_id = str(result.get("message_id") or "")
-            results[kind] = {"message_id": message_id, "kind": label, "ok": True}
+            results[result_key] = {"message_id": message_id, "kind": label, "ok": True}
             progress_cb(base + span, kind, f"Telegram готов: message_id={message_id}")
 
         else:
             raise RuntimeError(f"unsupported publish target: {kind}")
 
     return {"results": results}
+
+
+def publish_job(
+    *,
+    job_id: str,
+    workdir: Path,
+    source_video: Path,
+    mirrored_source_video: Path | None = None,
+    targets: list[dict[str, Any]],
+    progress_cb: Callable[[float, str, str], None],
+    log_cb: Callable[[str], None],
+    target_progress_cb: Callable[[str, float, str, str], None] | None = None,
+) -> dict[str, Any]:
+    instagram_priority = {("trial", False): 0, ("trial", True): 1, ("instagram", False): 2, ("instagram", True): 3}
+    instagram_targets = sorted(
+        [target for target in targets if str(target.get("kind") or "") in {"trial", "instagram"}],
+        key=lambda target: instagram_priority.get(
+            (str(target.get("kind") or ""), bool(target.get("mirrored"))), 99
+        ),
+    )
+    youtube_targets = sorted(
+        [target for target in targets if str(target.get("kind") or "") == "youtube"],
+        key=lambda target: bool(target.get("mirrored")),
+    )
+    other_targets = [
+        target for target in targets
+        if str(target.get("kind") or "") not in {"trial", "instagram", "youtube"}
+    ]
+    lanes = [("instagram", instagram_targets + other_targets), ("youtube", youtube_targets)]
+    lanes = [(name, lane_targets) for name, lane_targets in lanes if lane_targets]
+    state = {name: 0.0 for name, _ in lanes}
+    weights = {name: len(lane_targets) for name, lane_targets in lanes}
+    total_weight = max(1, sum(weights.values()))
+    state_lock = threading.Lock()
+
+    def update_lane(name: str, percent: float, stage: str, detail: str) -> None:
+        with state_lock:
+            state[name] = max(state[name], max(0.0, min(100.0, percent)))
+            overall = sum(state[key] * weights[key] for key in state) / total_weight
+        progress_cb(overall, stage, detail)
+
+    def run_lane(name: str, lane_targets: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, str]]:
+        lane_results: dict[str, Any] = {}
+        lane_errors: dict[str, str] = {}
+        count = max(1, len(lane_targets))
+        for index, target in enumerate(lane_targets):
+            target_id = str(target.get("id") or target.get("kind") or f"target_{index}")
+
+            def target_progress(percent: float, stage: str, detail: str) -> None:
+                if target_progress_cb:
+                    target_progress_cb(target_id, percent, detail, "publishing")
+                update_lane(name, (index + percent / 100) * 100 / count, stage, detail)
+
+            try:
+                result = _publish_targets(
+                    job_id=job_id,
+                    workdir=workdir,
+                    source_video=source_video,
+                    mirrored_source_video=mirrored_source_video,
+                    targets=[target],
+                    progress_cb=target_progress,
+                    log_cb=log_cb,
+                )
+                lane_results.update(result["results"])
+                if target_progress_cb:
+                    target_progress_cb(target_id, 100, "Опубликовано", "done")
+            except Exception as exc:
+                lane_errors[target_id] = str(exc)
+                if target_progress_cb:
+                    target_progress_cb(target_id, 100, str(exc), "error")
+                log_cb(f"publish target failed: {target_id}: {exc}")
+            update_lane(name, (index + 1) * 100 / count, target_id, f"Цель завершена: {target_id}")
+        return lane_results, lane_errors
+
+    results: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=min(2, len(lanes))) as executor:
+        futures = [executor.submit(run_lane, name, lane_targets) for name, lane_targets in lanes]
+        for future in futures:
+            lane_results, lane_errors = future.result()
+            results.update(lane_results)
+            errors.update(lane_errors)
+    return {"results": results, "errors": errors}
