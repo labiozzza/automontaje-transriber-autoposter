@@ -128,6 +128,18 @@ h1 {
 .publish-live-item.done .publish-live-fill { background: var(--green); }
 .publish-live-item.error .publish-live-fill { background: var(--red); }
 .publish-live-detail { margin-top: 6px; color: var(--text2); font-size: 11px; overflow-wrap: anywhere; }
+.cover-status { margin-top: 14px; color: var(--text2); font-size: 12px; }
+.cover-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.cover-card { position: relative; aspect-ratio: 9/16; overflow: hidden; cursor: zoom-in; border: 2px solid transparent; border-radius: 10px; background: #080a0f; }
+.cover-card.selected { border-color: var(--accent2); box-shadow: 0 0 0 2px rgba(167,139,250,.22); }
+.cover-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cover-check { position: absolute; top: 8px; right: 8px; z-index: 2; width: 25px; height: 25px; accent-color: var(--accent); }
+.cover-name { position: absolute; left: 0; right: 0; bottom: 0; padding: 18px 8px 7px; color: #fff; font-size: 11px; background: linear-gradient(transparent,rgba(0,0,0,.8)); }
+.cover-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+.cover-zoom { position: fixed; inset: 0; z-index: 1100; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(0,0,0,.92); }
+.cover-zoom.active { display: flex; }
+.cover-zoom img { max-width: min(92vw,540px); max-height: 92vh; border-radius: 12px; }
+@media (max-width: 620px) { .cover-tools { grid-template-columns: 1fr; } }
 @media (max-width: 620px) { .publish-target-grid { grid-template-columns: 1fr; } }
 
 .card {
@@ -1011,6 +1023,16 @@ select option { background: var(--surface2); }
         </div>
         <div class="toggle-row">
           <div>
+            <div class="toggle-label">Предложить обложку</div>
+            <div class="toggle-desc">Параллельно с монтажом Big Pickle создаст 4 обложки через gpt_imagegen</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="montageProposeCover">
+            <div class="toggle-slider"></div>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <div>
             <div class="toggle-label">Умная подсветка (BigPickle)</div>
             <div class="toggle-desc" id="montageBigpickleDesc">Цвета слов по смыслу, нужен интернет</div>
           </div>
@@ -1153,6 +1175,21 @@ select option { background: var(--surface2); }
           <div class="publish-field-head"><label for="montagePublishText">Текст для Instagram</label><span id="montagePublishTextCount">0 / 2000</span></div>
           <textarea id="montagePublishText" maxlength="2000" rows="6" placeholder="Подпись к публикации" oninput="updatePublishCounts()"></textarea>
         </div>
+        <div class="publish-field">
+          <div class="publish-field-head"><span>Обложка</span><span>выберите одну</span></div>
+          <div class="cover-status" id="montageCoverStatus">Обложки не создавались</div>
+          <div class="cover-grid" id="montageCoverGrid"></div>
+          <div class="cover-tools">
+            <label class="btn" style="text-align:center;cursor:pointer">Загрузить свою<input id="montageCoverUpload" type="file" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="uploadMontageCover()"></label>
+            <button class="btn" type="button" onclick="toggleStopFrameCover()">Выбрать стоп-кадр</button>
+          </div>
+          <div id="montageStopFrameTools" style="display:none;margin-top:12px">
+            <div class="publish-field-head"><label for="montageCoverTime">Стоп-кадр</label><span id="montageCoverTimeLabel">00:00.000</span></div>
+            <input id="montageCoverTime" type="range" min="0" max="1" step="0.1" value="0" oninput="previewCoverFrame()" style="width:100%">
+            <input id="montageCoverTitle" maxlength="100" placeholder="Название на обложке" style="margin-top:10px">
+            <button class="btn btn-primary" type="button" id="generateCoverBtn" style="margin-top:10px" onclick="generateStopFrameCover()">Создать через ChatGPT</button>
+          </div>
+        </div>
         <div class="toggle-desc" style="margin-top:12px">Порядок Instagram: пробное → пробное перевёрнутое → основная лента → основная лента перевёрнутое. YouTube публикуется параллельно.</div>
         <div class="error-box" id="montagePublishError"></div>
         <div class="publish-live-progress" id="montagePublishLiveProgress"></div>
@@ -1163,6 +1200,7 @@ select option { background: var(--surface2); }
         </div>
       </div>
     </div>
+    <div class="cover-zoom" id="montageCoverZoom" onclick="this.classList.remove('active')"><img id="montageCoverZoomImage" alt="Обложка крупно"></div>
   </div> <!-- /viewMontage -->
 
   <div id="viewAnimations" class="view">
@@ -2201,6 +2239,7 @@ async function startMontage() {
   form.append('face_tracking', document.getElementById('montageFaceTrack').checked);
   form.append('autozoom', document.getElementById('montageAutozoom').checked);
   form.append('mirror_horizontal', document.getElementById('montageMirrorHorizontal').checked);
+  form.append('propose_cover', document.getElementById('montageProposeCover').checked);
   form.append('subtitles', true);
   form.append('bigpickle', document.getElementById('montageBigpickle').checked);
 
@@ -2282,6 +2321,7 @@ async function refreshMontageResult() {
     const res = await fetch(`/api/montage/result/${montageJobId}`);
     const data = await res.json();
     montageUpdateProgress(data.progress || 0, data.stage || data.status, data.detail || '');
+    renderCoverState(data);
     document.getElementById('montageStartBtn').disabled = true;
     if (data.status === 'error') {
       clearInterval(montagePollTimer);
@@ -2291,11 +2331,13 @@ async function refreshMontageResult() {
       return;
     }
     if (data.result) {
-      if (data.status !== 'publishing') {
+      if (data.status !== 'publishing' && data.cover_status !== 'generating') {
         clearInterval(montagePollTimer);
         montagePollTimer = null;
       }
-      localStorage.removeItem('montageJobId');
+      if (data.status !== 'publishing' && data.cover_status !== 'generating') {
+        localStorage.removeItem('montageJobId');
+      }
       document.getElementById('montageResultsCard').classList.add('active');
       const info = document.getElementById('montageResultInfo');
       const size = Math.round((data.result.video_size || 0) / 1048576);
@@ -2435,6 +2477,7 @@ async function publishMontage() {
   form.append('targets_json', JSON.stringify(targets));
   form.append('title', title);
   form.append('text', text);
+  if (window.__selectedCoverId) form.append('cover_id', window.__selectedCoverId);
   document.getElementById('montagePublishBtn').disabled = true;
   document.getElementById('montagePublishBtn').textContent = 'Публикация...';
   document.getElementById('montagePublishError').classList.remove('active');
@@ -2466,6 +2509,10 @@ function openPublishWindow() {
   document.getElementById('montagePublishModal').classList.add('active');
   document.body.style.overflow = 'hidden';
   updatePublishCounts();
+  renderCoverState(window.__coverState || {});
+  const video = document.getElementById('montageVideo');
+  const slider = document.getElementById('montageCoverTime');
+  slider.max = String(Math.max(0.1, Number(video.duration) || 1));
 }
 
 function closePublishWindow() {
@@ -2497,6 +2544,87 @@ function publishWindowError(message) {
   const box = document.getElementById('montagePublishError');
   box.textContent = message;
   box.classList.add('active');
+}
+
+function renderCoverState(state) {
+  window.__coverState = state || {};
+  if (Array.isArray(state.covers)) window.__montageCovers = state.covers;
+  const covers = window.__montageCovers || [];
+  if (window.__selectedCoverId && !covers.some(item => item.id === window.__selectedCoverId)) window.__selectedCoverId = '';
+  const status = document.getElementById('montageCoverStatus');
+  if (!status) return;
+  const progress = Number(state.cover_progress) || 0;
+  if (state.cover_status === 'generating') status.textContent = `${state.cover_detail || 'Генерация обложек'} · ${progress.toFixed(0)}%`;
+  else if (state.cover_status === 'error') status.textContent = `Ошибка генерации: ${state.cover_error || state.cover_detail || ''}`;
+  else if (covers.length) status.textContent = `Доступно обложек: ${covers.length}`;
+  else status.textContent = 'Обложки не создавались';
+  document.getElementById('montageCoverGrid').innerHTML = covers.map(item => {
+    const url = `/api/montage/${encodeURIComponent(montageJobId)}/covers/${encodeURIComponent(item.file)}?t=${Date.now()}`;
+    const selected = item.id === window.__selectedCoverId;
+    return `<div class="cover-card ${selected ? 'selected' : ''}" onclick="openCoverZoom('${url}')">
+      <input class="cover-check" type="checkbox" ${selected ? 'checked' : ''} aria-label="Выбрать ${esc(item.name || item.id)}" onclick="event.stopPropagation();selectMontageCover('${esc(item.id)}')">
+      <img src="${url}" alt="${esc(item.name || 'Обложка')}" loading="lazy">
+      <div class="cover-name">${esc(item.name || item.id)}</div>
+    </div>`;
+  }).join('');
+}
+
+function selectMontageCover(id) {
+  window.__selectedCoverId = window.__selectedCoverId === id ? '' : id;
+  renderCoverState(window.__coverState || {});
+}
+
+function openCoverZoom(url) {
+  document.getElementById('montageCoverZoomImage').src = url;
+  document.getElementById('montageCoverZoom').classList.add('active');
+}
+
+async function uploadMontageCover() {
+  const input = document.getElementById('montageCoverUpload');
+  if (!input.files.length || !montageJobId) return;
+  const form = new FormData();
+  form.append('cover', input.files[0]);
+  const response = await fetch(`/api/montage/${montageJobId}/covers/upload`, {method:'POST',body:form});
+  const data = await response.json();
+  input.value = '';
+  if (!response.ok) { publishWindowError(data.detail || 'Не удалось загрузить обложку'); return; }
+  window.__montageCovers = data.covers || [];
+  window.__selectedCoverId = window.__montageCovers.at(-1)?.id || '';
+  renderCoverState({covers:window.__montageCovers,cover_status:'done'});
+}
+
+function toggleStopFrameCover() {
+  const tools = document.getElementById('montageStopFrameTools');
+  tools.style.display = tools.style.display === 'none' ? 'block' : 'none';
+  previewCoverFrame();
+}
+
+function previewCoverFrame() {
+  const slider = document.getElementById('montageCoverTime');
+  const time = Number(slider.value) || 0;
+  document.getElementById('montageCoverTimeLabel').textContent = fmtTimecode(time);
+  const video = document.getElementById('montageVideo');
+  if (Number.isFinite(video.duration)) video.currentTime = Math.min(time, video.duration);
+}
+
+async function generateStopFrameCover() {
+  const title = document.getElementById('montageCoverTitle').value.trim();
+  if (!title) { publishWindowError('Введите название для обложки'); return; }
+  const button = document.getElementById('generateCoverBtn');
+  button.disabled = true;
+  const form = new FormData();
+  form.append('timestamp', document.getElementById('montageCoverTime').value || 0);
+  form.append('title', title);
+  try {
+    const response = await fetch(`/api/montage/${montageJobId}/covers/generate`, {method:'POST',body:form});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Ошибка генерации');
+    startMontagePolling();
+  } catch (error) {
+    publishWindowError(error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 if ('serviceWorker' in navigator) {

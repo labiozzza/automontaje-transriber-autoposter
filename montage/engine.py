@@ -724,8 +724,14 @@ def _publish_targets(
             _, raw_url = instagram.upload_to_github(staged)
             time.sleep(3)
             instagram.verify_public_video(raw_url, raw_ip, lambda p, d: sub_progress(25 + p * 0.2, d))
+            cover_url = ""
+            cover_path = Path(str(target.get("cover_path") or ""))
+            if cover_path.is_file():
+                sub_progress(44, "Загрузка обложки в GitHub Raw...")
+                _, cover_url = instagram.upload_cover_to_github(cover_path)
+                time.sleep(3)
             caption = str(target.get("caption") or target.get("text") or "")
-            container = instagram.create_container(variant, graph_ip, raw_url, caption)
+            container = instagram.create_container(variant, graph_ip, raw_url, caption, cover_url)
             instagram.wait_container(variant, graph_ip, container, lambda p, d: sub_progress(45 + p * 0.5, d))
             media_id = instagram.publish_container(variant, graph_ip, container)
             info = instagram.media_info(variant, graph_ip, media_id)
@@ -746,12 +752,18 @@ def _publish_targets(
                 lambda p, detail: sub_progress(p * 0.25, detail),
             )
             title = str(target.get("title") or target.get("text") or "Мой ролик")
+            thumbnail_path = None
+            cover_path = Path(str(target.get("cover_path") or ""))
+            if cover_path.is_file():
+                thumbnail_path = youtube.prepare_thumbnail(
+                    cover_path, workdir / "youtube_staging" / f"{result_key}_thumbnail.jpg"
+                )
             upload_ready_called: list[bool] = [False]
             def upload_ready() -> None:
                 upload_ready_called[0] = True
             def yt_progress(p: float, detail: str) -> None:
                 sub_progress(25 + p * 0.75, detail)
-            info = youtube.upload(youtube_source, title, yt_progress, upload_ready)
+            info = youtube.upload(youtube_source, title, yt_progress, upload_ready, thumbnail_path)
             results[result_key] = {"video_id": info["video_id"], "shorts_url": info["shorts_url"], "watch_url": info["watch_url"], "kind": label}
             progress_cb(base + span, kind, f"YouTube готов: {info['shorts_url']}")
 

@@ -28,6 +28,7 @@ GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "volynecsvatoslav-png").strip()
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "instagram-media").strip()
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main").strip()
 GITHUB_REELS_DIR = os.environ.get("GITHUB_REELS_DIR", "reels").strip()
+GITHUB_COVERS_DIR = os.environ.get("GITHUB_COVERS_DIR", "published-media/covers").strip()
 
 GRAPH_HOST = os.environ.get("GRAPH_HOST", "graph.instagram.com").strip()
 RAW_HOST = os.environ.get("RAW_HOST", "raw.githubusercontent.com").strip()
@@ -362,6 +363,32 @@ def publish_video_to_github(video_path: Path) -> tuple[Path, str]:
     return target_path, raw_url
 
 
+def publish_image_to_github(image_path: Path) -> tuple[Path, str]:
+    ensure_git_repo()
+    target_dir = GITHUB_REPO_DIR / GITHUB_COVERS_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re_safe_filename(image_path.name)
+    target_path = target_dir / safe_name
+    if image_path.resolve() != target_path.resolve():
+        shutil.copy2(image_path, target_path)
+    relative_path = target_path.relative_to(GITHUB_REPO_DIR).as_posix()
+    run_process(["git", "add", "--", relative_path], cwd=GITHUB_REPO_DIR, check=True)
+    status = run_process(["git", "status", "--porcelain", "--", relative_path], cwd=GITHUB_REPO_DIR, check=True)
+    if status.stdout.strip():
+        commit = run_process(["git", "commit", "-m", f"Add cover {safe_name}", "--", relative_path], cwd=GITHUB_REPO_DIR)
+        if commit.returncode != 0:
+            die(f"Не удалось сделать git commit обложки:\n{commit.stdout}\n{commit.stderr}")
+    try:
+        ensure_push_auth(GITHUB_REPO_DIR)
+    except RuntimeError as exc:
+        die(str(exc))
+    push = run_process(["git", "push", "origin", GITHUB_BRANCH], cwd=GITHUB_REPO_DIR, timeout=300)
+    if push.returncode != 0:
+        die(f"git push обложки не удался:\n{push.stdout}\n{push.stderr}")
+    encoded_path = quote(relative_path, safe="/")
+    return target_path, f"https://{RAW_HOST}/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{encoded_path}"
+
+
 def check_public_video(raw_url: str, raw_ip: str) -> None:
     print(f"   RAW URL: {raw_url}")
 
@@ -480,18 +507,22 @@ def create_reel_container(
     video_url: str,
     caption: str,
     share_to_feed: bool,
+    cover_url: str = "",
 ) -> str:
+    params = {
+        "media_type": "REELS",
+        "video_url": video_url,
+        "caption": caption,
+        "share_to_feed": "true" if share_to_feed else "false",
+        "access_token": ACCESS_TOKEN,
+    }
+    if cover_url:
+        params["cover_url"] = cover_url
     data = meta_request(
         graph_ip,
         "POST",
         f"{IG_USER_ID}/media",
-        {
-            "media_type": "REELS",
-            "video_url": video_url,
-            "caption": caption,
-            "share_to_feed": "true" if share_to_feed else "false",
-            "access_token": ACCESS_TOKEN,
-        },
+        params,
     )
 
     container_id = str(data["id"])

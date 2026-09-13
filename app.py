@@ -836,6 +836,7 @@ MONTAGE_WORK.mkdir(exist_ok=True)
 from montage.secrets_env import load_secrets_env
 load_secrets_env()
 from montage import engine as montage_engine
+from montage import cover_generator
 
 app.mount("/animation-assets", StaticFiles(directory=str(montage_engine.ANIMATIONS_DIR)), name="animation-assets")
 app.mount("/font-assets", StaticFiles(directory=str(montage_engine.FONTS_DIR)), name="font-assets")
@@ -916,6 +917,81 @@ async def process_montage(job_id: str, params: dict):
         job["error"] = str(e)
         print(f"[montage] job {job_id} failed: {traceback.format_exc()}", file=sys.stderr)
         await broadcast_progress(job_id, 0, "error", str(e))
+
+
+async def _store_project_covers(job_id: str) -> None:
+    job = jobs[job_id]
+    project_ids = [job.get("project_id"), f"p_{job_id}"]
+    async with PROJECTS_LOCK:
+        for project_id in project_ids:
+            if project_id and project_id in PROJECTS:
+                PROJECTS[project_id]["covers"] = list(job.get("covers") or [])
+                PROJECTS[project_id]["covers_dir"] = str(MONTAGE_WORK / job_id / "covers")
+
+
+async def process_cover_suggestions(job_id: str) -> None:
+    job = jobs[job_id]
+    loop = asyncio.get_running_loop()
+    job["cover_status"] = "generating"
+    job["cover_progress"] = 0
+    job["cover_detail"] = "Подготовка стоп-кадров"
+    job["cover_error"] = None
+
+    def progress(percent: float, detail: str) -> None:
+        def update() -> None:
+            job["cover_progress"] = round(max(0, min(100, percent)), 1)
+            job["cover_detail"] = detail
+        loop.call_soon_threadsafe(update)
+
+    try:
+        items = await asyncio.to_thread(
+            cover_generator.generate_suggested_covers,
+            job_id,
+            Path(job["video_path"]),
+            str(job.get("srt_text") or ""),
+            MONTAGE_WORK / job_id / "covers",
+            progress,
+        )
+        job["covers"] = items
+        job["cover_status"] = "done"
+        job["cover_progress"] = 100
+        job["cover_detail"] = f"Обложки готовы: {len(items)}"
+        await _store_project_covers(job_id)
+    except Exception as exc:
+        job["cover_status"] = "error"
+        job["cover_error"] = str(exc)
+        job["cover_detail"] = str(exc)
+        print(f"[covers] job {job_id} failed: {traceback.format_exc()}", file=sys.stderr)
+
+
+async def process_custom_cover(job_id: str, timestamp: float, title: str) -> None:
+    job = jobs[job_id]
+    loop = asyncio.get_running_loop()
+    job["cover_status"] = "generating"
+    job["cover_progress"] = 0
+    job["cover_detail"] = "Создание обложки из стоп-кадра"
+    job["cover_error"] = None
+
+    def progress(percent: float, detail: str) -> None:
+        def update() -> None:
+            job.update(cover_progress=round(percent, 1), cover_detail=detail)
+        loop.call_soon_threadsafe(update)
+
+    try:
+        video = Path((job.get("result") or {}).get("result_video") or job["video_path"])
+        items = await asyncio.to_thread(
+            cover_generator.generate_custom_cover,
+            video, timestamp, title, MONTAGE_WORK / job_id / "covers", progress,
+        )
+        job["covers"] = items
+        job["cover_status"] = "done"
+        job["cover_progress"] = 100
+        job["cover_detail"] = "Новая обложка готова"
+        await _store_project_covers(job_id)
+    except Exception as exc:
+        job["cover_status"] = "error"
+        job["cover_error"] = str(exc)
+        job["cover_detail"] = str(exc)
 
 
 async def process_publish(job_id: str, targets: list):
@@ -1094,6 +1170,7 @@ async def start_montage(
     animation_offset_x: int = Form(0),
     animation_item_size: int = Form(72),
     animation_bar: bool = Form(False),
+    propose_cover: bool = Form(False),
     zoom_timeline_json: Optional[str] = Form(None),
 ):
     job_id = str(uuid.uuid4())[:8]
@@ -1103,6 +1180,7 @@ async def start_montage(
     video_path: Optional[Path] = None
     srt_text = ""
     src_job_id: Optional[str] = None
+    existing_covers: list[dict] = []
 
     if project_id:
         async with PROJECTS_LOCK:
@@ -1113,6 +1191,10 @@ async def start_montage(
             raise HTTPException(400, "Видео проекта недоступно")
         video_path = work_dir / f"project_video{Path(project['video_path']).suffix or '.mp4'}"
         shutil.copy2(project["video_path"], video_path)
+        project_covers_dir = Path(str(project.get("covers_dir") or ""))
+        if project_covers_dir.is_dir() and project.get("covers"):
+            shutil.copytree(project_covers_dir, work_dir / "covers", dirs_exist_ok=True)
+            existing_covers = list(project.get("covers") or [])
         src_job_id = project.get("transcript_job_id")
         if src_job_id and jobs.get(src_job_id) and jobs[src_job_id].get("status") == "done" \
                 and isinstance(jobs[src_job_id].get("result"), list):
@@ -1161,6 +1243,11 @@ async def start_montage(
         "publish": None,
         "error": None,
         "created_at": datetime.now().isoformat(),
+        "covers": existing_covers,
+        "cover_status": "done" if existing_covers else "idle",
+        "cover_progress": 0,
+        "cover_detail": "",
+        "cover_error": None,
     }
     params = {
         "subtitle_mode": subtitle_mode,
@@ -1199,8 +1286,12 @@ async def start_montage(
                     "transcript_job_id": src_job_id,
                     "status": "ready",
                     "created_at": datetime.now().isoformat(),
+                    "covers": list(jobs[job_id].get("covers") or []),
+                    "covers_dir": str(MONTAGE_WORK / job_id / "covers"),
                 }
     asyncio.create_task(process_montage(job_id, params))
+    if propose_cover:
+        asyncio.create_task(process_cover_suggestions(job_id))
     return {"job_id": job_id, "filename": original_name}
 
 
@@ -1210,6 +1301,7 @@ async def publish_montage(
     targets_json: str = Form(...),
     title: str = Form(""),
     text: str = Form(""),
+    cover_id: str = Form(""),
 ):
     if job_id not in jobs or jobs[job_id].get("kind") != "montage":
         raise HTTPException(404, "Montage job not found")
@@ -1241,9 +1333,19 @@ async def publish_montage(
     if any(target_id.startswith("youtube") for target_id in target_ids) and not title.strip():
         raise HTTPException(400, "Для YouTube укажите заголовок")
     targets = []
+    selected_cover = None
+    if cover_id:
+        selected_cover = next((item for item in job.get("covers") or [] if item.get("id") == cover_id), None)
+        if selected_cover is None:
+            raise HTTPException(400, "Выбранная обложка не найдена")
+        cover_path = MONTAGE_WORK / job_id / "covers" / Path(str(selected_cover.get("file") or "")).name
+        if not cover_path.exists():
+            raise HTTPException(400, "Файл выбранной обложки недоступен")
     for target_id in target_ids:
         kind, mirrored, label = target_specs[target_id]
         target = {"id": target_id, "kind": kind, "mirrored": mirrored, "label": label}
+        if selected_cover:
+            target["cover_path"] = str(cover_path)
         if kind == "youtube":
             target["title"] = title.strip()
         else:
@@ -1270,7 +1372,60 @@ async def montage_result(job_id: str):
         "publish": job.get("publish"),
         "publish_errors": job.get("publish_errors"),
         "publish_progress": job.get("publish_progress"),
+        "covers": job.get("covers") or [],
+        "cover_status": job.get("cover_status") or "idle",
+        "cover_progress": job.get("cover_progress") or 0,
+        "cover_detail": job.get("cover_detail") or "",
+        "cover_error": job.get("cover_error"),
     }
+
+
+@app.get("/api/montage/{job_id}/covers/{filename}")
+async def montage_cover_asset(job_id: str, filename: str):
+    if job_id not in jobs or jobs[job_id].get("kind") != "montage":
+        raise HTTPException(404, "Montage job not found")
+    safe_name = Path(filename).name
+    allowed = {Path(str(item.get("file") or "")).name for item in jobs[job_id].get("covers") or []}
+    if safe_name not in allowed:
+        raise HTTPException(404, "Обложка не найдена")
+    path = MONTAGE_WORK / job_id / "covers" / safe_name
+    return FileResponse(str(path), media_type="image/png")
+
+
+@app.post("/api/montage/{job_id}/covers/upload")
+async def upload_montage_cover(job_id: str, cover: UploadFile = File(...)):
+    if job_id not in jobs or jobs[job_id].get("kind") != "montage":
+        raise HTTPException(404, "Montage job not found")
+    suffix = Path(cover.filename or "cover.png").suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(400, "Поддерживаются PNG, JPG и WebP")
+    covers_dir = MONTAGE_WORK / job_id / "covers"
+    covers_dir.mkdir(parents=True, exist_ok=True)
+    temporary = covers_dir / f"upload-source-{uuid.uuid4().hex[:8]}{suffix}"
+    temporary.write_bytes(await cover.read())
+    try:
+        items = await asyncio.to_thread(cover_generator.save_uploaded_cover, temporary, covers_dir)
+    except Exception as exc:
+        raise HTTPException(400, f"Не удалось обработать обложку: {exc}")
+    finally:
+        temporary.unlink(missing_ok=True)
+    jobs[job_id]["covers"] = items
+    jobs[job_id]["cover_status"] = "done"
+    await _store_project_covers(job_id)
+    return {"covers": items}
+
+
+@app.post("/api/montage/{job_id}/covers/generate")
+async def generate_montage_cover(job_id: str, timestamp: float = Form(...), title: str = Form(...)):
+    if job_id not in jobs or jobs[job_id].get("kind") != "montage":
+        raise HTTPException(404, "Montage job not found")
+    title = title.strip()
+    if not title or len(title) > 100:
+        raise HTTPException(400, "Название обложки должно содержать 1–100 символов")
+    if jobs[job_id].get("cover_status") == "generating":
+        raise HTTPException(409, "Генерация обложки уже выполняется")
+    asyncio.create_task(process_custom_cover(job_id, max(0, timestamp), title))
+    return {"status": "generating"}
 
 
 @app.get("/api/montage/download/{job_id}")

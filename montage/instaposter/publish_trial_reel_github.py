@@ -480,26 +480,28 @@ def create_reel_container(
     video_url: str,
     caption: str,
     graduation_strategy: str,
+    cover_url: str = "",
 ) -> str:
     if graduation_strategy not in {"MANUAL", "SS_PERFORMANCE"}:
         die(
             "graduation_strategy должен быть MANUAL или SS_PERFORMANCE."
         )
 
+    params = {
+        "media_type": "REELS",
+        "video_url": video_url,
+        "caption": caption,
+        "trial_params": json.dumps({"graduation_strategy": graduation_strategy}),
+        "share_to_feed": "false",
+        "access_token": ACCESS_TOKEN,
+    }
+    if cover_url:
+        params["cover_url"] = cover_url
     data = meta_request(
         graph_ip,
         "POST",
         f"{IG_USER_ID}/media",
-        {
-            "media_type": "REELS",
-            "video_url": video_url,
-            "caption": caption,
-            "trial_params": json.dumps(
-                {"graduation_strategy": graduation_strategy}
-            ),
-            "share_to_feed": "false",
-            "access_token": ACCESS_TOKEN,
-        },
+        params,
     )
 
     container_id = str(data["id"])

@@ -17,6 +17,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
 
+from PIL import Image, ImageOps
+
 
 class YouTubePublisher:
     def __init__(self, instaposter_dir: Path, python: Path, log_path: Path) -> None:
@@ -185,12 +187,25 @@ class YouTubePublisher:
         progress(100, f"YouTube CFR {fps}: готово")
         return output
 
+    def prepare_thumbnail(self, source: Path, output: Path) -> Path:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(source) as image:
+            thumbnail = ImageOps.fit(image.convert("RGB"), (1280, 720), method=Image.Resampling.LANCZOS)
+            quality = 92
+            while True:
+                thumbnail.save(output, "JPEG", quality=quality, optimize=True)
+                if output.stat().st_size <= 2 * 1024 * 1024 or quality <= 65:
+                    break
+                quality -= 7
+        return output
+
     def upload(
         self,
         video_path: Path,
         title: str,
         progress: Callable[[float, str], None],
         upload_ready: Callable[[], None],
+        thumbnail_path: Path | None = None,
     ) -> dict[str, str]:
         result = self._run(
             {
@@ -202,6 +217,7 @@ class YouTubePublisher:
                 "category_id": "22",
                 "tags": [],
                 "made_for_kids": False,
+                "thumbnail_path": str(thumbnail_path.resolve()) if thumbnail_path else "",
             },
             progress,
             upload_ready,
@@ -320,6 +336,12 @@ def _bridge_upload(module: ModuleType, payload: dict[str, Any], protocol: Any, c
     video_id = str((response or {}).get("id") or "")
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         raise RuntimeError("invalid_video_id")
+    thumbnail_path = Path(str(payload.get("thumbnail_path") or ""))
+    if thumbnail_path.is_file():
+        youtube.thumbnails().set(
+            videoId=video_id,
+            media_body=module.MediaFileUpload(str(thumbnail_path), mimetype="image/jpeg"),
+        ).execute()
     _emit(protocol, {"type": "progress", "percent": 100})
     _emit(protocol, {"type": "result", "video_id": video_id})
 

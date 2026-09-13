@@ -11,6 +11,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
 
+from PIL import Image
+
 
 GITHUB_LIMIT_BYTES = 100 * 1024 * 1024
 GITHUB_TARGET_BYTES = 88 * 1024 * 1024
@@ -219,6 +221,12 @@ class InstagramPublisher:
     def upload_to_github(self, staged: Path) -> tuple[Path, str]:
         return self.main.publish_video_to_github(staged)
 
+    def upload_cover_to_github(self, cover: Path) -> tuple[Path, str]:
+        prepared = cover.with_name(f".{cover.stem}-instagram.jpg")
+        with Image.open(cover) as image:
+            image.convert("RGB").save(prepared, "JPEG", quality=94, optimize=True)
+        return self.main.publish_image_to_github(prepared)
+
     def verify_public_video(self, raw_url: str, raw_ip: str, progress: Callable[[float, str], None]) -> None:
         last_error: Exception | None = None
         for attempt in range(1, 7):
@@ -233,10 +241,10 @@ class InstagramPublisher:
                     time.sleep(3)
         raise RuntimeError(f"GitHub Raw URL is not ready: {self.redact(str(last_error))}")
 
-    def create_container(self, kind: str, graph_ip: str, video_url: str, caption: str) -> str:
+    def create_container(self, kind: str, graph_ip: str, video_url: str, caption: str, cover_url: str = "") -> str:
         if kind == "trial":
-            return self.trial.create_reel_container(graph_ip, video_url, caption, "MANUAL")
-        return self.main.create_reel_container(graph_ip, video_url, caption, True)
+            return self.trial.create_reel_container(graph_ip, video_url, caption, "MANUAL", cover_url)
+        return self.main.create_reel_container(graph_ip, video_url, caption, True, cover_url)
 
     def wait_container(
         self,
