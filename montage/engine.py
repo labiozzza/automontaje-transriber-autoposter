@@ -674,6 +674,8 @@ def _publish_targets(
     workdir: Path,
     source_video: Path,
     mirrored_source_video: Path | None,
+    original_video: Path,
+    transcript_text: str,
     targets: list[dict[str, Any]],
     progress_cb: Callable[[float, str, str], None],
     log_cb: Callable[[str], None],
@@ -736,7 +738,25 @@ def _publish_targets(
             media_id = instagram.publish_container(variant, graph_ip, container)
             info = instagram.media_info(variant, graph_ip, media_id)
             permalink = str(info.get("permalink") or "")
-            results[result_key] = {"media_id": media_id, "permalink": permalink, "kind": label}
+            published_result = {"media_id": media_id, "permalink": permalink, "kind": label}
+            try:
+                from .social_stats import archive_instagram_reel
+                archive_dir = archive_instagram_reel(
+                    media=info,
+                    account_id=str(reel.IG_USER_ID),
+                    transcript=transcript_text,
+                    source_video=original_video,
+                    published_video=staged,
+                    post_text=caption,
+                    job_id=job_id,
+                    variant=result_key,
+                )
+                published_result["archive_dir"] = str(archive_dir)
+                log_cb(f"socialmediastats: {media_id} сохранён в {archive_dir}")
+            except Exception as exc:
+                published_result["archive_error"] = str(exc)
+                log_cb(f"socialmediastats archive failed: {media_id}: {exc}")
+            results[result_key] = published_result
             progress_cb(base + span, kind, f"Instagram готов: {permalink or media_id}")
 
         elif kind == "youtube":
@@ -855,6 +875,8 @@ def publish_job(
     workdir: Path,
     source_video: Path,
     mirrored_source_video: Path | None = None,
+    original_video: Path | None = None,
+    transcript_text: str = "",
     targets: list[dict[str, Any]],
     progress_cb: Callable[[float, str, str], None],
     log_cb: Callable[[str], None],
@@ -906,6 +928,8 @@ def publish_job(
                     workdir=workdir,
                     source_video=source_video,
                     mirrored_source_video=mirrored_source_video,
+                    original_video=original_video or source_video,
+                    transcript_text=transcript_text,
                     targets=[target],
                     progress_cb=target_progress,
                     log_cb=log_cb,

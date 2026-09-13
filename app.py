@@ -842,6 +842,115 @@ app.mount("/animation-assets", StaticFiles(directory=str(montage_engine.ANIMATIO
 app.mount("/font-assets", StaticFiles(directory=str(montage_engine.FONTS_DIR)), name="font-assets")
 
 
+def _save_montage_job(job_id: str) -> None:
+    job = jobs.get(job_id)
+    if not job or job.get("kind") != "montage":
+        return
+    workdir = MONTAGE_WORK / job_id
+    workdir.mkdir(parents=True, exist_ok=True)
+    target = workdir / "job_state.json"
+    temporary = workdir / ".job_state.json.tmp"
+    temporary.write_text(json.dumps(job, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    os.replace(temporary, target)
+
+
+def _recover_montage_jobs() -> None:
+    workdirs = sorted(
+        (path for path in MONTAGE_WORK.iterdir() if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
+    )[-20:]
+    for workdir in workdirs:
+        state_path = workdir / "job_state.json"
+        if state_path.is_file():
+            try:
+                job = json.loads(state_path.read_text(encoding="utf-8"))
+                if job.get("kind") == "montage" and (job.get("result") or {}).get("result_video"):
+                    if not job.get("selected_cover_id"):
+                        prepared_cover = next((workdir / "covers").glob(".*-instagram.jpg"), None)
+                        if prepared_cover:
+                            job["selected_cover_id"] = prepared_cover.name[1:].split("-instagram.", 1)[0]
+                    if job.get("status") in {"processing", "publishing"}:
+                        job["status"] = "done"
+                        job["stage"] = "done"
+                        job["detail"] = "Задание восстановлено после перезапуска"
+                        targets = job.get("last_publish_targets") or []
+                        job["publish_errors"] = {
+                            str(item.get("id")): "Попытка была прервана перезапуском; повторите публикацию"
+                            for item in targets if item.get("id")
+                        }
+                    jobs[str(job["id"])] = job
+                    continue
+            except Exception:
+                pass
+
+        # Older jobs predate on-disk state; recover enough metadata to download or republish them.
+        result_video = workdir / "final.mp4"
+        if not result_video.is_file():
+            continue
+        sources = list(workdir.glob("project_video.*")) + list(workdir.glob("source.*"))
+        transcripts = list(workdir.glob("*_words.srt"))
+        if not sources or not transcripts:
+            continue
+        subtitle_mode = "phrases" if (workdir / "sub_phrases.mp4").is_file() else "words"
+        timeline = {"subtitle_mode": subtitle_mode, "subtitle_position": "custom", "zoom": []}
+        try:
+            zoom = json.loads((workdir / "zoom_timeline_config.json").read_text(encoding="utf-8"))
+            timeline["zoom"] = (zoom.get("render") or {}).get("zoom", {}).get("timeline") or []
+        except Exception:
+            pass
+        try:
+            duration = float(montage_engine.ffprobe(result_video).get("format", {}).get("duration") or 0)
+        except Exception:
+            duration = 0
+        covers = []
+        try:
+            covers = json.loads((workdir / "covers" / "manifest.json").read_text(encoding="utf-8")).get("covers") or []
+        except Exception:
+            pass
+        instagram_attempted = any((workdir / "staging").glob("*_normal_*.mp4"))
+        prepared_cover = next((workdir / "covers").glob(".*-instagram.jpg"), None)
+        selected_cover_id = prepared_cover.name[1:].split("-instagram.", 1)[0] if prepared_cover else ""
+        job_id = workdir.name
+        jobs[job_id] = {
+            "id": job_id,
+            "original_name": sources[0].name,
+            "video_path": str(sources[0]),
+            "srt_text": transcripts[0].read_text(encoding="utf-8", errors="replace"),
+            "transcript_job_id": None,
+            "project_id": None,
+            "kind": "montage",
+            "status": "done",
+            "progress": 100,
+            "stage": "done",
+            "detail": "Готовый ролик восстановлен после перезапуска",
+            "result": {
+                "job_id": job_id,
+                "result_video": str(result_video.resolve()),
+                "preview_video": str((workdir / "preview.mp4").resolve()),
+                "duration": duration,
+                "subtitle_mode": subtitle_mode,
+                "timeline": timeline,
+            },
+            "params": {"subtitle_mode": subtitle_mode, "mirror_horizontal": False},
+            "publish": {} if instagram_attempted else None,
+            "publish_errors": ({"instagram_feed": "Предыдущая попытка Instagram не завершилась; можно повторить"}
+                               if instagram_attempted else {}),
+            "publish_progress": None,
+            "error": None,
+            "created_at": datetime.fromtimestamp(workdir.stat().st_mtime).isoformat(),
+            "covers": covers,
+            "selected_cover_id": selected_cover_id,
+            "cover_status": "done" if covers else "idle",
+            "cover_progress": 100 if covers else 0,
+            "cover_detail": "",
+            "cover_error": None,
+        }
+        _save_montage_job(job_id)
+
+
+_recover_montage_jobs()
+
+
 def _threaded_progress(loop, job_id):
     def progress(pct, stage, detail=""):
         asyncio.run_coroutine_threadsafe(
@@ -910,11 +1019,13 @@ async def process_montage(job_id: str, params: dict):
         job["stage"] = "done"
         job["detail"] = "Готово"
         job["result"] = meta
+        _save_montage_job(job_id)
         await broadcast_progress(job_id, 100, "done", "Рендер завершён")
         await _montage_announce(job_id, f"Готово: {Path(meta['result_video']).name} ({(os.path.getsize(meta['result_video']) >> 20)} МБ)")
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
+        _save_montage_job(job_id)
         print(f"[montage] job {job_id} failed: {traceback.format_exc()}", file=sys.stderr)
         await broadcast_progress(job_id, 0, "error", str(e))
 
@@ -998,9 +1109,10 @@ async def process_publish(job_id: str, targets: list):
     job = jobs[job_id]
     loop = asyncio.get_running_loop()
     try:
+        previous_publish = dict(job.get("publish") or {})
         job["status"] = "publishing"
         job["error"] = None
-        job["publish"] = None
+        job["publish"] = previous_publish or None
         job["publish_errors"] = None
         job["publish_progress"] = {
             str(target["id"]): {
@@ -1011,6 +1123,8 @@ async def process_publish(job_id: str, targets: list):
             }
             for target in targets
         }
+        job["last_publish_targets"] = targets
+        _save_montage_job(job_id)
         progress = _threaded_progress(loop, job_id)
         workdir = MONTAGE_WORK / job_id
         source_video = Path(job["result"]["result_video"])
@@ -1070,6 +1184,8 @@ async def process_publish(job_id: str, targets: list):
             workdir=workdir,
             source_video=source_video,
             mirrored_source_video=mirrored_source_video,
+            original_video=Path(job["video_path"]),
+            transcript_text=str(job.get("srt_text") or ""),
             targets=targets,
             progress_cb=publish_progress,
             target_progress_cb=target_progress,
@@ -1080,14 +1196,16 @@ async def process_publish(job_id: str, targets: list):
         job["status"] = "done"
         job["progress"] = 100
         job["stage"] = "published"
-        job["publish"] = result["results"]
+        job["publish"] = {**previous_publish, **result["results"]}
         job["publish_errors"] = result.get("errors") or {}
         detail = "Публикация завершена" if not job["publish_errors"] else "Публикация завершена с ошибками"
         job["detail"] = detail
+        _save_montage_job(job_id)
         await broadcast_progress(job_id, 100, "published", detail)
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
+        _save_montage_job(job_id)
         await broadcast_progress(job_id, 0, "error", str(e))
 
 
@@ -1122,9 +1240,11 @@ async def montage_status():
     load_secrets_env()
     status = montage_engine.montage_status()
     entries = [
-        {"id": j["id"], "name": j["original_name"], "status": j["status"]}
+        {"id": j["id"], "name": j["original_name"], "status": j["status"],
+         "created_at": j.get("created_at", "")}
         for j in jobs.values() if j.get("kind") == "montage"
     ]
+    entries.sort(key=lambda item: item["created_at"])
     return {**status, "jobs": entries}
 
 
@@ -1274,6 +1394,7 @@ async def start_montage(
         "zoom_timeline_override": zoom_override,
     }
     jobs[job_id]["params"] = params
+    _save_montage_job(job_id)
     if not project_id and video and video.filename:
         name = video.filename
         ext = Path(name).suffix.lower()
@@ -1330,6 +1451,10 @@ async def publish_montage(
     unknown = [target_id for target_id in target_ids if target_id not in target_specs]
     if unknown:
         raise HTTPException(400, f"Неизвестные цели публикации: {', '.join(unknown)}")
+    already_published = set((job.get("publish") or {}).keys())
+    target_ids = [target_id for target_id in target_ids if target_id not in already_published]
+    if not target_ids:
+        raise HTTPException(400, "Все выбранные цели уже успешно опубликованы")
     if any(target_id.startswith("youtube") for target_id in target_ids) and not title.strip():
         raise HTTPException(400, "Для YouTube укажите заголовок")
     targets = []
@@ -1352,6 +1477,9 @@ async def publish_montage(
             target["text"] = text.strip()
             target["caption"] = text.strip()
         targets.append(target)
+    job["selected_cover_id"] = cover_id
+    job["last_publish_targets"] = targets
+    _save_montage_job(job_id)
     asyncio.create_task(process_publish(job_id, targets))
     return {"job_id": job_id, "status": "publishing", "targets": [t.get("kind") for t in targets]}
 
@@ -1377,6 +1505,8 @@ async def montage_result(job_id: str):
         "cover_progress": job.get("cover_progress") or 0,
         "cover_detail": job.get("cover_detail") or "",
         "cover_error": job.get("cover_error"),
+        "selected_cover_id": job.get("selected_cover_id") or "",
+        "last_publish_targets": job.get("last_publish_targets") or [],
     }
 
 

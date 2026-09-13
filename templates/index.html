@@ -2166,6 +2166,14 @@ async function refreshMontageStatus() {
   try {
     const res = await fetch('/api/montage/status', {cache: 'no-store'});
     const s = await res.json();
+    if (!montageJobId && s.jobs && s.jobs.length) {
+      const recoverable = [...s.jobs].reverse().find(job => job.status === 'done');
+      if (recoverable) {
+        montageJobId = recoverable.id;
+        localStorage.setItem('montageJobId', montageJobId);
+        startMontagePolling();
+      }
+    }
     const row = document.getElementById('montageStatusRow');
     row.innerHTML = '';
     const badge = (ok, label, cls) => `<span class="badge ${ok ? 'ok' : 'no'} ${cls || ''}">${label}: ${ok ? 'готово' : 'нет'}</span>`;
@@ -2321,6 +2329,18 @@ async function refreshMontageResult() {
     const res = await fetch(`/api/montage/result/${montageJobId}`);
     const data = await res.json();
     montageUpdateProgress(data.progress || 0, data.stage || data.status, data.detail || '');
+    if (data.selected_cover_id && !window.__selectedCoverId) {
+      window.__selectedCoverId = data.selected_cover_id;
+    }
+    if (!window.__publishFieldsRestored && data.last_publish_targets && data.last_publish_targets.length) {
+      const previous = data.last_publish_targets;
+      const title = previous.find(target => target.title)?.title || '';
+      const text = previous.find(target => target.text || target.caption);
+      document.getElementById('montagePublishTitle').value = title;
+      document.getElementById('montagePublishText').value = text ? (text.text || text.caption || '') : '';
+      window.__publishFieldsRestored = true;
+      updatePublishCounts();
+    }
     renderCoverState(data);
     document.getElementById('montageStartBtn').disabled = true;
     if (data.status === 'error') {
@@ -2334,9 +2354,6 @@ async function refreshMontageResult() {
       if (data.status !== 'publishing' && data.cover_status !== 'generating') {
         clearInterval(montagePollTimer);
         montagePollTimer = null;
-      }
-      if (data.status !== 'publishing' && data.cover_status !== 'generating') {
-        localStorage.removeItem('montageJobId');
       }
       document.getElementById('montageResultsCard').classList.add('active');
       const info = document.getElementById('montageResultInfo');
@@ -2413,16 +2430,31 @@ async function refreshMontageResult() {
         const row = url
           ? `<div><span class="badge ok">${esc(r.kind || kind)}: OK</span> <a href="${esc(url)}" target="_blank" style="color:var(--accent2)">${esc(url)}</a></div>`
           : `<div><span class="badge ok">${esc(r.kind || kind)}: OK</span></div>`;
-        box.innerHTML += row;
-        modalBox.innerHTML += row;
+        const archive = r.archive_dir
+          ? ` <span class="badge up">архив сохранён</span>`
+          : (r.archive_error ? ` <span class="badge no" title="${esc(r.archive_error)}">ошибка архива</span>` : '');
+        box.innerHTML += row.replace('</div>', `${archive}</div>`);
+        modalBox.innerHTML += row.replace('</div>', `${archive}</div>`);
       }
       for (const [kind, message] of Object.entries(data.publish_errors || {})) {
         const row = `<div><span class="badge no">${esc(kind)}: ошибка</span> ${esc(message)}</div>`;
         box.innerHTML += row;
         modalBox.innerHTML += row;
       }
-      document.getElementById('montagePublishBtn').disabled = true;
-      document.getElementById('montagePublishBtn').textContent = Object.keys(data.publish_errors || {}).length ? 'Завершено с ошибками' : 'Опубликовано';
+      if (data.status !== 'publishing') {
+        const failedTargets = Object.keys(data.publish_errors || {});
+        const publishButton = document.getElementById('montagePublishBtn');
+        if (failedTargets.length) {
+          for (const checkbox of document.querySelectorAll('.publish-target-checkbox')) {
+            checkbox.checked = failedTargets.includes(checkbox.value);
+          }
+          publishButton.disabled = false;
+          publishButton.textContent = 'Повторить ошибки';
+        } else {
+          publishButton.disabled = true;
+          publishButton.textContent = 'Опубликовано';
+        }
+      }
     }
   } catch(e) {
     montageError('Не удалось получить результат: ' + e.message);
