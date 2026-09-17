@@ -380,14 +380,13 @@ def render_montage(
             if isinstance(override_x, (int, float)) and 0 <= override_x <= 1:
                 position_x = float(override_x)
             else:
-                position_x = 0.5
-            render["position"] = {"x": position_x, "y": position_y}
+                position_x = 0.12
+            render["position"] = {"x": position_x, "y": position_y, "anchor": "left"}
             if isinstance(render.get("style"), dict):
                 scale = options.get("subtitle_scale")
                 base_font = float(render["style"].get("font_size") or 64)
                 if isinstance(scale, (int, float)) and scale > 0:
                     render["style"]["font_size"] = int(round(base_font * max(0.5, min(2.5, float(scale)))))
-                render["position"]["anchor"] = render["position"].get("anchor", "center")
             if options.get("subtitle_box") is not None:
                 render.setdefault("box", {})["enabled"] = bool(options["subtitle_box"])
         cfg["render"] = render
@@ -556,25 +555,28 @@ def render_montage(
         raise RuntimeError("Не создан итоговый файл")
 
     delivery_mp4 = workdir / "final.mp4"
-    progress_cb(99, "delivery", "Финальное HEVC-кодирование для галереи...")
     delivery_cmd = [
         shutil.which("ffmpeg") or "ffmpeg", "-y", "-i", str(final_mp4),
         "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx265", "-tag:v", "hvc1",
         "-preset", "medium", "-crf", "14",
         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(delivery_mp4),
     ]
-    if subprocess.run(delivery_cmd, capture_output=True, timeout=1800).returncode != 0:
-        delivery_mp4 = final_mp4
-
     preview_mp4 = workdir / "preview.mp4"
-    progress_cb(99.5, "preview", "Подготовка preview для браузера...")
     preview_cmd = [
         shutil.which("ffmpeg") or "ffmpeg", "-y", "-i", str(final_mp4),
         "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
         "-profile:v", "high", "-level:v", "4.1", "-preset", "medium", "-crf", "12",
         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(preview_mp4),
     ]
-    if subprocess.run(preview_cmd, capture_output=True, timeout=1800).returncode != 0:
+    progress_cb(99, "finalize", "Одновременное кодирование финального файла и preview...")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        delivery_future = executor.submit(subprocess.run, delivery_cmd, capture_output=True, timeout=1800)
+        preview_future = executor.submit(subprocess.run, preview_cmd, capture_output=True, timeout=1800)
+        delivery_result = delivery_future.result()
+        preview_result = preview_future.result()
+    if delivery_result.returncode != 0:
+        delivery_mp4 = final_mp4
+    if preview_result.returncode != 0:
         preview_mp4 = delivery_mp4
 
     timeline_data: dict[str, Any] = {

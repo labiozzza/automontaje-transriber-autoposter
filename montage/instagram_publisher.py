@@ -124,12 +124,18 @@ class InstagramPublisher:
             command = [
                 self.ffmpeg,
                 "-y",
+                "-fflags",
+                "+genpts",
                 "-i",
                 str(source),
                 "-map",
                 "0:v:0",
                 "-map",
                 "0:a:0?",
+                "-vf",
+                "setpts=PTS-STARTPTS,fps=30",
+                "-af",
+                "aresample=async=1:first_pts=0,asetpts=PTS-STARTPTS",
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -146,6 +152,11 @@ class InstagramPublisher:
                 "aac",
                 "-b:a",
                 "160k",
+                "-ar",
+                "48000",
+                "-fps_mode",
+                "cfr",
+                "-shortest",
                 "-movflags",
                 "+faststart",
                 "-progress",
@@ -186,6 +197,50 @@ class InstagramPublisher:
             self.on_log(f"Файл все еще больше лимита GitHub, повторное сжатие (попытка {attempt + 2})")
         raise RuntimeError("cannot fit publication video under GitHub 100 MB limit")
 
+    def _normalize_for_publication(
+        self,
+        source: Path,
+        output: Path,
+        progress: Callable[[float, str], None],
+    ) -> None:
+        duration = self._duration(source)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.unlink(missing_ok=True)
+        command = [
+            self.ffmpeg, "-y", "-fflags", "+genpts", "-i", str(source),
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-vf", "setpts=PTS-STARTPTS,fps=30",
+            "-af", "aresample=async=1:first_pts=0,asetpts=PTS-STARTPTS",
+            "-c:v", "libx264", "-profile:v", "high", "-level:v", "4.1",
+            "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-fps_mode", "cfr", "-shortest", "-movflags", "+faststart",
+            "-progress", "pipe:1", "-nostats", str(output),
+        ]
+        last_percent = -1
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.log_path.open("a", encoding="utf-8", errors="replace") as log:
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=log, text=True,
+                encoding="utf-8", errors="replace",
+            )
+            assert process.stdout is not None
+            for line in process.stdout:
+                key, _, value = line.strip().partition("=")
+                if key not in {"out_time_us", "out_time_ms"}:
+                    continue
+                try:
+                    percent = min(99, max(0, int(float(value) / 1_000_000 / duration * 100)))
+                except (ValueError, ZeroDivisionError):
+                    continue
+                if percent != last_percent:
+                    last_percent = percent
+                    progress(percent, f"Синхронизация видео и звука: {percent}%")
+            code = process.wait()
+        if code != 0 or not output.exists():
+            raise RuntimeError("publication A/V normalization failed")
+        progress(100, "Видео и звук синхронизированы")
+
     def prepare_variant(
         self,
         source: Path,
@@ -197,18 +252,19 @@ class InstagramPublisher:
         if not source.exists():
             raise RuntimeError(f"result video not found: {source.name}")
         staging_dir.mkdir(parents=True, exist_ok=True)
-        generation = source.stat().st_mtime_ns
+        generation = time.time_ns()
         staged = staging_dir / f"reel_{job_id}_{variant}_{generation}.mp4"
         staged.unlink(missing_ok=True)
-        if source.stat().st_size > GITHUB_LIMIT_BYTES:
-            self.on_log(f"{source.name}: больше 100 MB, создаю отдельную версию для публикации")
-            self._transcode_for_github(source, staged, progress)
-        else:
+        self.on_log(f"{source.name}: создаю H.264 CFR версию с синхронизированным звуком")
+        self._normalize_for_publication(source, staged, progress)
+        if staged.stat().st_size > GITHUB_LIMIT_BYTES:
+            oversized = staged.with_name(f".{staged.stem}-oversized.mp4")
+            os.replace(staged, oversized)
             try:
-                os.link(source, staged)
-            except OSError:
-                shutil.copy2(source, staged)
-            progress(100, "Файл готов без дополнительного сжатия")
+                self.on_log("Нормализованный файл больше 100 MB, дополнительно сжимаю")
+                self._transcode_for_github(oversized, staged, progress)
+            finally:
+                oversized.unlink(missing_ok=True)
         self.main.validate_local_video(staged)
         return staged
 

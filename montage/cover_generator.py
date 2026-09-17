@@ -10,12 +10,13 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 
 OPENCODE = os.environ.get("OPENCODE_BIN", "").strip() or shutil.which("opencode") or "opencode"
 MODEL = os.environ.get("COVER_MODEL", "opencode/big-pickle")
 COVER_SIZE = (1080, 1920)
+FONT_PATH = Path(__file__).resolve().parent / "fonts" / "Comfortaa.ttf"
 
 
 def _duration(video: Path) -> float:
@@ -48,6 +49,88 @@ def _normalize_cover(path: Path) -> None:
         temporary = path.with_name(f".{path.stem}-normalized.png")
         image.save(temporary, "PNG", optimize=True)
     temporary.replace(path)
+
+
+def _wrap_title(draw: ImageDraw.ImageDraw, title: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
+    lines: list[str] = []
+    current = ""
+    for word in title.split():
+        candidate = f"{current} {word}".strip()
+        if current and draw.textbbox((0, 0), candidate, font=font, stroke_width=5)[2] > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return "\n".join(lines)
+
+
+def _title_font(size: int) -> ImageFont.FreeTypeFont:
+    font = ImageFont.truetype(str(FONT_PATH), size)
+    font.set_variation_by_name("Bold")
+    return font
+
+
+def _finish_generated_cover(path: Path, title: str) -> None:
+    with Image.open(path) as source:
+        image = ImageOps.fit(source.convert("RGB"), COVER_SIZE, method=Image.Resampling.LANCZOS)
+        image = ImageEnhance.Color(image).enhance(0.68)
+        image = ImageEnhance.Brightness(image).enhance(0.88)
+        image = ImageEnhance.Contrast(image).enhance(0.95)
+        draw = ImageDraw.Draw(image, "RGBA")
+
+        max_width = 880
+        chosen_font = _title_font(64)
+        wrapped = title.strip()
+        for size in range(156, 63, -4):
+            font = _title_font(size)
+            candidate = _wrap_title(draw, title.strip(), font, max_width)
+            bbox = draw.multiline_textbbox((0, 0), candidate, font=font, spacing=18, align="center", stroke_width=5)
+            if bbox[2] - bbox[0] <= max_width and bbox[3] - bbox[1] <= 620:
+                chosen_font = font
+                wrapped = candidate
+                break
+
+        bbox = draw.multiline_textbbox((0, 0), wrapped, font=chosen_font, spacing=18, align="center", stroke_width=5)
+        text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        x = (COVER_SIZE[0] - text_width) / 2 - bbox[0]
+        y = (COVER_SIZE[1] - text_height) / 2 - bbox[1]
+        padding_x, padding_y = 48, 36
+        draw.rounded_rectangle(
+            (
+                x + bbox[0] - padding_x,
+                y + bbox[1] - padding_y,
+                x + bbox[2] + padding_x,
+                y + bbox[3] + padding_y,
+            ),
+            radius=30,
+            fill=(0, 0, 0, 112),
+        )
+        draw.multiline_text(
+            (x, y), wrapped, font=chosen_font, fill=(245, 243, 238, 255),
+            spacing=18, align="center", stroke_width=5, stroke_fill=(0, 0, 0, 205),
+        )
+        temporary = path.with_name(f".{path.stem}-finished.png")
+        image.save(temporary, "PNG", optimize=True)
+    temporary.replace(path)
+
+
+def _cover_titles(path: Path, transcript: str, count: int) -> list[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        candidates = data.get("titles", []) if isinstance(data, dict) else data
+    except (OSError, json.JSONDecodeError):
+        candidates = []
+    if not isinstance(candidates, list):
+        candidates = []
+    titles = [str(item).strip() for item in candidates if str(item).strip()][:count]
+    words = transcript.split()
+    while len(titles) < count:
+        start = len(words) * len(titles) // max(1, count)
+        fallback = " ".join(words[start:start + 5]).strip(" .,!?:;—-") or "Новый взгляд"
+        titles.append(fallback)
+    return titles
 
 
 def _run_agent(prompt: str, workdir: Path, log_path: Path, expected: list[Path], progress: Callable[[float, str], None]) -> None:
@@ -100,6 +183,7 @@ def generate_suggested_covers(job_id: str, video: Path, transcript: str, covers_
     frames = [extract_frame(video, timestamp, frames_dir / f"frame_{index + 1:02d}.jpg") for index, timestamp in enumerate(timestamps)]
     progress(12, "Стоп-кадры подготовлены")
     outputs = [covers_dir / f"suggested_{index + 1:02d}.png" for index in range(4)]
+    titles_path = covers_dir / "suggested_titles.json"
     calls = "\n".join(
         f"{index + 1}. images=['{frame}']; out='{output}'; quality='medium'; size='1088x1920'."
         for index, (frame, output) in enumerate(zip(frames, outputs))
@@ -108,12 +192,13 @@ def generate_suggested_covers(job_id: str, video: Path, transcript: str, covers_
 
 ТРЕБОВАНИЯ К КАЖДОЙ ОБЛОЖКЕ:
 - это вертикальная обложка Instagram Reels, рассчитанная на просмотр в ленте телефона;
-- сохрани человека, предметы и узнаваемость исходного кадра, но сделай изображение контрастным и кликабельным;
-- придумай отдельный короткий кликбейтный заголовок на русском на основании полной транскрибации ниже;
-- заголовок должен быть крупным, читаемым, РОВНО ПО ЦЕНТРУ изображения;
-- шрифт визуально должен быть Comfortaa Bold; не размещай никакой другой текст, логотипы или watermark;
-- текст должен помещаться в safe-zone и хорошо читаться в маленькой карточке ленты Instagram;
-- в prompt каждого gpt_imagegen явно напиши точный выбранный заголовок и все требования выше.
+- сохрани человека, предметы и узнаваемость исходного кадра;
+- визуальный стиль спокойный и сдержанный: естественный свет, умеренный контраст, приглушённые натуральные цвета;
+- исключи неон, чрезмерную насыщенность, пересветы, агрессивный HDR и кричащие цветовые акценты;
+- НЕ РИСУЙ на изображении текст, буквы, логотипы или watermark: приложение добавит заголовок само;
+- придумай для каждого варианта отдельный короткий заголовок на русском из 3–5 слов, без CAPS LOCK и лишних восклицательных знаков;
+- до завершения сохрани точные четыре заголовка в UTF-8 JSON-файл `{titles_path}` в формате {{"titles": ["...", "...", "...", "..."]}};
+- в prompt каждого gpt_imagegen явно повтори требования к спокойному фону без любого текста.
 
 TOOL-ВЫЗОВЫ И ФАЙЛЫ:
 {calls}
@@ -128,13 +213,14 @@ TOOL-ВЫЗОВЫ И ФАЙЛЫ:
     existing = [path for path in outputs if path.exists()]
     if not existing:
         raise RuntimeError("Big Pickle не создал ни одной обложки")
-    for path in existing:
-        _normalize_cover(path)
+    titles = _cover_titles(titles_path, transcript, len(existing))
+    for path, title in zip(existing, titles):
+        _finish_generated_cover(path, title)
     items = _manifest_items(covers_dir)
     known = {item.get("file") for item in items}
     for index, path in enumerate(existing):
         if path.name not in known:
-            items.append({"id": path.stem, "file": path.name, "name": f"Вариант {index + 1}", "source": "generated"})
+            items.append({"id": path.stem, "file": path.name, "name": titles[index], "source": "generated"})
     _save_manifest(covers_dir, items)
     progress(100, f"Обложки готовы: {len(existing)}")
     return items
@@ -146,11 +232,11 @@ def generate_custom_cover(video: Path, timestamp: float, title: str, covers_dir:
     frame = extract_frame(video, timestamp, covers_dir / "frames" / f"{cover_id}.jpg")
     output = covers_dir / f"{cover_id}.png"
     progress(15, "Стоп-кадр подготовлен")
-    prompt = f"""Вызови gpt_imagegen ровно один раз. Image 1 — стоп-кадр ролика. Создай вертикальную обложку Instagram Reels: контрастную и заметную в ленте, сохрани узнаваемость кадра. Наложи ТОЧНО этот текст без изменений: «{title}». Текст крупный, шрифт Comfortaa Bold, расположен РОВНО ПО ЦЕНТРУ, в safe-zone. Никакого другого текста, логотипов и watermark. Параметры: images=['{frame}']; out='{output}'; quality='medium'; size='1088x1920'."""
+    prompt = f"""Вызови gpt_imagegen ровно один раз. Image 1 — стоп-кадр ролика. Создай вертикальный фон обложки Instagram Reels, сохрани узнаваемость кадра. Стиль спокойный и сдержанный: естественный свет, умеренный контраст, приглушённые натуральные цвета. Исключи неон, чрезмерную насыщенность, пересветы и агрессивный HDR. НЕ РИСУЙ текст, буквы, логотипы или watermark: приложение добавит заголовок само. Параметры: images=['{frame}']; out='{output}'; quality='medium'; size='1088x1920'."""
     _run_agent(prompt, covers_dir, covers_dir / f"{cover_id}.log", [output], progress)
     if not output.exists():
         raise RuntimeError("Обложка не создана")
-    _normalize_cover(output)
+    _finish_generated_cover(output, title)
     items = _manifest_items(covers_dir)
     items.append({"id": cover_id, "file": output.name, "name": title, "source": "custom"})
     _save_manifest(covers_dir, items)

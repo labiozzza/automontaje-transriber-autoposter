@@ -133,7 +133,21 @@ h1 {
 .cover-card { position: relative; aspect-ratio: 9/16; overflow: hidden; cursor: zoom-in; border: 2px solid transparent; border-radius: 10px; background: #080a0f; }
 .cover-card.selected { border-color: var(--accent2); box-shadow: 0 0 0 2px rgba(167,139,250,.22); }
 .cover-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.cover-check { position: absolute; top: 8px; right: 8px; z-index: 2; width: 25px; height: 25px; accent-color: var(--accent); }
+.publish-field input.cover-check {
+  position: absolute; top: 10px; right: 10px; z-index: 2;
+  width: 30px; height: 30px; margin: 0; padding: 0; box-sizing: border-box;
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  border: 2px solid rgba(255,255,255,.86); border-radius: 50%;
+  background: rgba(8,10,15,.72); box-shadow: 0 3px 12px rgba(0,0,0,.38);
+  transition: border-color .18s ease, background-color .18s ease, transform .18s ease;
+}
+.cover-check:hover { transform: scale(1.06); border-color: #fff; }
+.cover-check:checked {
+  border-color: var(--accent2); background-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round' d='m5 12 4 4L19 7'/%3E%3C/svg%3E");
+  background-position: center; background-repeat: no-repeat; background-size: 19px;
+}
+.cover-check:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(167,139,250,.45), 0 3px 12px rgba(0,0,0,.38); }
 .cover-name { position: absolute; left: 0; right: 0; bottom: 0; padding: 18px 8px 7px; color: #fff; font-size: 11px; background: linear-gradient(transparent,rgba(0,0,0,.8)); }
 .cover-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
 .cover-zoom { position: fixed; inset: 0; z-index: 1100; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(0,0,0,.92); }
@@ -228,53 +242,66 @@ select option { background: var(--surface2); }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 18px;
   padding: 12px 0;
   border-bottom: 1px solid var(--border);
 }
 .toggle-row:last-child { border-bottom: none; }
+.toggle-row > div:first-child { min-width: 0; }
 
-.toggle-label { font-size: 14px; }
-.toggle-desc { font-size: 12px; color: var(--text2); }
+.toggle-label { font-size: 14px; font-weight: 600; }
+.toggle-desc { margin-top: 2px; font-size: 12px; line-height: 1.4; color: var(--text2); }
 
 .toggle {
-  position: relative;
-  width: 48px;
-  height: 26px;
+  position: relative; display: inline-block; flex: 0 0 54px;
+  width: 54px;
+  height: 30px;
   cursor: pointer;
 }
 
-.toggle input { display: none; }
+.toggle input {
+  position: absolute; inset: 0; z-index: 2;
+  width: 100%; height: 100%; margin: 0; opacity: 0; pointer-events: none;
+}
 
 .toggle-slider {
   position: absolute;
   inset: 0;
-  background: var(--surface2);
+  box-sizing: border-box;
+  background: linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.025));
   border: 1px solid var(--border);
-  border-radius: 13px;
-  transition: all 0.2s;
+  border-radius: 999px;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,.3);
+  transition: background .2s ease, border-color .2s ease, box-shadow .2s ease;
 }
 
 .toggle-slider::after {
   content: '';
   position: absolute;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
-  background: var(--text2);
+  background: #d7d8df;
   top: 2px;
   left: 2px;
-  transition: all 0.2s;
+  box-shadow: 0 2px 6px rgba(0,0,0,.38);
+  transition: transform .22s cubic-bezier(.2,.8,.2,1), background .2s ease;
 }
 
 .toggle input:checked + .toggle-slider {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: linear-gradient(135deg,var(--accent),var(--accent2));
+  border-color: rgba(255,255,255,.2);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.2), 0 0 0 1px rgba(108,92,231,.12);
 }
 
 .toggle input:checked + .toggle-slider::after {
-  transform: translateX(22px);
+  transform: translateX(24px);
   background: white;
 }
+.toggle:hover .toggle-slider { border-color: rgba(167,139,250,.55); }
+.toggle input:focus-visible + .toggle-slider { box-shadow: 0 0 0 3px rgba(167,139,250,.3); }
+.toggle input:disabled { cursor: not-allowed; }
+.toggle input:disabled + .toggle-slider { opacity: .48; }
 
 /* Speaker count */
 .speaker-count-row {
@@ -496,12 +523,13 @@ select option { background: var(--surface2); }
   position: absolute;
   left: 50%;
   top: 78%;
-  transform: translate(-50%, -50%);
+  transform: translateY(-50%);
   max-width: 76%;
   padding: 10px 18px;
   border-radius: 20px;
   background: rgba(0, 0, 0, 0.53);
   box-shadow: 0 0 0 1px rgba(255,255,255,.12);
+  border-left: 3px solid rgba(0,230,118,.9);
   color: #fff;
   text-align: center;
   pointer-events: auto;
@@ -511,7 +539,7 @@ select option { background: var(--surface2); }
   cursor: grab;
   will-change: transform, font-size;
 }
-.sub-drag-layer .sub-card.no-box { background: transparent; box-shadow: none; padding: 0; }
+.sub-drag-layer .sub-card.no-box { background: transparent; box-shadow: 0 0 0 1px rgba(0,230,118,.4); }
 .sub-drag-layer .sub-card:active {
   cursor: grabbing;
   box-shadow: 0 0 0 3px rgba(0,230,118,.55), 0 0 0 1px rgba(255,255,255,.2);
@@ -859,25 +887,6 @@ select option { background: var(--surface2); }
     </div>
   </div>
 
-  <!-- Video preview -->
-  <div class="results-container" id="transcribePreviewCard">
-    <div class="card">
-      <div class="card-title">Превью видео</div>
-      <div class="video-stage">
-        <video id="transcribePreviewVideo" playsinline controls preload="metadata"></video>
-      </div>
-      <div class="timebar-scale">
-        <span id="trPreviewCur">00:00.000</span>
-        <span id="trPreviewDur">00:00.000</span>
-      </div>
-      <div class="keybar" id="trPreviewKeybar">
-        <div id="trPreviewMarkers"></div>
-        <div id="trPreviewPlayhead" class="keybar-playhead"></div>
-      </div>
-      <button class="cta-btn" id="useInMontageBtn" disabled onclick="useInMontage()">Использовать в монтаже</button>
-      <div id="trPreviewHint" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
-    </div>
-  </div>
   </div> <!-- /viewTranscribe -->
 
   <!-- ======== ТАБ 2: АВТОМОНТАЖ ======== -->
@@ -909,7 +918,7 @@ select option { background: var(--surface2); }
           <video id="projectPreviewVideo" playsinline controls preload="metadata"></video>
           <div class="timeline-animation-preview" id="timelineAnimationPreview"><img class="timeline-animation-item" alt="Кадр анимации"></div>
           <div class="sub-drag-layer">
-            <div class="sub-drag-tip">X <span id="projectPreviewSubX">0.50</span> • Y <span id="projectPreviewSubY">0.78</span> • Размер <span id="projectPreviewSubScale">1.00</span></div>
+            <div class="sub-drag-tip">Левая грань X <span id="projectPreviewSubX">0.12</span> • Y <span id="projectPreviewSubY">0.78</span> • Размер <span id="projectPreviewSubScale">1.00</span></div>
             <div class="sub-card" id="projectPreviewSubCard"><span class="sub-card-text" id="projectPreviewSubText"></span></div>
           </div>
         </div>
@@ -1056,7 +1065,7 @@ select option { background: var(--surface2); }
             <option value="center">По центру</option>
             <option value="top">Вверху</option>
           </select>
-          <input type="hidden" id="montageSubtitleX" value="0.50">
+          <input type="hidden" id="montageSubtitleX" value="0.12">
           <input type="hidden" id="montageSubtitleY" value="0.78">
           <input type="hidden" id="montageSubtitleScale" value="1.00">
         </div>
@@ -1195,6 +1204,7 @@ select option { background: var(--surface2); }
         <div class="publish-live-progress" id="montagePublishLiveProgress"></div>
         <div class="publish-results" id="montagePublishModalResults"></div>
         <div class="publish-actions">
+          <button class="btn" type="button" id="montageNewPublishBtn" style="display:none" onclick="startNewPublication()">Новая публикация</button>
           <button class="btn" type="button" onclick="closePublishWindow()">Отмена</button>
           <button class="btn btn-primary" id="montagePublishBtn" onclick="publishMontage()">Начать публикацию</button>
         </div>
@@ -1224,8 +1234,6 @@ select option { background: var(--surface2); }
 let jobId = null;
 let ws = null;
 let segments = [];
-let transcribeIsVideo = false;
-let transcribeJobForProject = null;
 let currentTab = 'dialogue';
 
 const SPEAKER_COLORS = ['speaker-0','speaker-1','speaker-2','speaker-3','speaker-4','speaker-5'];
@@ -1273,25 +1281,9 @@ async function handleFile(file) {
       xhr.send(formData);
     });
     jobId = data.job_id;
-    transcribeJobForProject = jobId;
     updateProgress(100, 'upload', 'Видео загружено. Выберите настройки и запустите транскрибацию.');
     document.getElementById('settingsCard').style.display = 'block';
     document.getElementById('startBtn').disabled = false;
-
-    transcribeIsVideo = /\.(mp4|mov|mkv|webm|avi|m4v|flv|3gp|ts)$/i.test(file.name);
-    const previewCard = document.getElementById('transcribePreviewCard');
-    if (transcribeIsVideo) {
-      previewCard.classList.add('active');
-      const v = document.getElementById('transcribePreviewVideo');
-      v.src = `/api/video/${jobId}?t=${Date.now()}`;
-      v.poster = `/api/thumb/${jobId}?t=${Date.now()}`;
-      document.getElementById('useInMontageBtn').disabled = true;
-      document.getElementById('useInMontageBtn').textContent = 'Использовать в монтаже';
-      document.getElementById('trPreviewHint').textContent =
-        'Превью доступно ещё во время транскрибации. Кнопка активируется по готовности текста.';
-    } else {
-      previewCard.classList.remove('active');
-    }
   } catch(e) {
     showError('Ошибка загрузки: ' + e.message);
   }
@@ -1394,7 +1386,6 @@ async function loadResult() {
     transcriptJobId = jobId;
     document.getElementById('resultsCard').classList.add('active');
     document.getElementById('montageTranscriptInfo').textContent = `Использовать транскрибацию: ${data.segments.length} сегментов`;
-    setupTranscribePreview();
     refreshProjects();
     refreshDisplay();
   } catch(e) {
@@ -1504,6 +1495,63 @@ let transcriptJobId = null;
 let montageWs = null;
 let projects = [];
 let selectedProjectId = null;
+let montageInputDirty = false;
+
+function clearMontageOutput(clearJob = false) {
+  if (clearJob) {
+    montageJobId = null;
+    localStorage.removeItem('montageJobId');
+  }
+  if (montagePollTimer) {
+    clearInterval(montagePollTimer);
+    montagePollTimer = null;
+  }
+  if (montageWs) {
+    montageWs.onclose = null;
+    montageWs.close();
+    montageWs = null;
+  }
+  document.getElementById('montageResultsCard').classList.remove('active');
+  document.getElementById('openPublishWindowBtn').disabled = true;
+  document.getElementById('montagePublishResults').innerHTML = '';
+  document.getElementById('montagePublishModalResults').innerHTML = '';
+  document.getElementById('montagePublishLiveProgress').innerHTML = '';
+  document.getElementById('montagePublishError').classList.remove('active');
+  document.getElementById('montageNewPublishBtn').style.display = 'none';
+  const publishButton = document.getElementById('montagePublishBtn');
+  publishButton.disabled = false;
+  publishButton.textContent = 'Начать публикацию';
+  for (const checkbox of document.querySelectorAll('.publish-target-checkbox')) checkbox.checked = false;
+  const video = document.getElementById('montageVideo');
+  video.pause();
+  video.removeAttribute('src');
+  video.dataset.job = '';
+  video.load();
+  window.__coverState = {};
+  window.__montageCovers = [];
+  window.__selectedCoverId = '';
+  window.__publishFieldsRestored = false;
+  window.__forceNewPublication = false;
+  const coverGrid = document.getElementById('montageCoverGrid');
+  coverGrid.innerHTML = '';
+  delete coverGrid.dataset.coverKey;
+  closePublishWindow();
+}
+
+function activateMontageJob(jobId) {
+  if (!jobId || jobId === montageJobId) return;
+  clearMontageOutput(true);
+  montageJobId = jobId;
+  montageInputDirty = false;
+  localStorage.setItem('montageJobId', montageJobId);
+  startMontagePolling();
+}
+
+function beginNewMontageInput() {
+  montageInputDirty = true;
+  clearMontageOutput(true);
+  montageUpdateProgress(0, 'idle', 'Настройте новый ролик', false);
+}
 
 function switchView(name) {
   document.querySelectorAll('.view-tab').forEach(b => b.classList.toggle('active', b.dataset.view === name));
@@ -1513,6 +1561,10 @@ function switchView(name) {
   if (name === 'montage') {
     refreshMontageStatus();
     refreshProjects();
+    startMontagePolling();
+  } else if (montagePollTimer) {
+    clearInterval(montagePollTimer);
+    montagePollTimer = null;
   }
 }
 
@@ -1535,10 +1587,11 @@ montageUploadZone.addEventListener('drop', e => {
 montageFileInput.addEventListener('change', () => { if (montageFileInput.files.length) setMontageVideo(montageFileInput.files[0]); });
 
 function setMontageVideo(file) {
+  beginNewMontageInput();
   montageVideoFile = file;
   document.getElementById('montageFileName').textContent = file.name;
   montageUploadZone.classList.add('has-file');
-  if (selectedProjectId) clearProject();
+  if (selectedProjectId) clearProject(true);
   document.getElementById('montageStartBtn').disabled = file ? false : true;
   const card = document.getElementById('projectPreviewCard');
   const video = document.getElementById('projectPreviewVideo');
@@ -1655,7 +1708,7 @@ function mountSubtitleOverlay(cfg) {
     y: cfg.tipY ? document.getElementById(cfg.tipY) : null,
     s: cfg.tipS ? document.getElementById(cfg.tipS) : null,
   };
-  const state = { x: 0.50, y: 0.78, scale: 1.0 };
+  const state = { x: 0.12, y: 0.78, scale: 1.0 };
   const pointers = new Map();
   let lastDist = 0;
   let gesture = null;
@@ -1685,6 +1738,7 @@ function mountSubtitleOverlay(cfg) {
   function render() {
     card.style.left = (state.x * 100) + '%';
     card.style.top = (state.y * 100) + '%';
+    card.style.maxWidth = (Math.min(0.76, Math.max(0.05, 1 - state.x)) * 100) + '%';
     card.style.setProperty('--sub-scale', state.scale.toFixed(2));
     if (tips.x) tips.x.textContent = state.x.toFixed(2);
     if (tips.y) tips.y.textContent = state.y.toFixed(2);
@@ -1714,7 +1768,7 @@ function mountSubtitleOverlay(cfg) {
     const prev = pointers.get(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (gesture === 'drag') {
-      state.x = clamp(state.x + (e.clientX - prev.x) / rect.width, 0.05, 0.95);
+      state.x = clamp(state.x + (e.clientX - prev.x) / rect.width, 0.02, 0.90);
       state.y = clamp(state.y + (e.clientY - prev.y) / rect.height, 0.05, 0.95);
       persist();
       render();
@@ -1783,63 +1837,15 @@ document.addEventListener('change', (e) => {
   if (e.target && e.target.id === 'montageSubtitlePosition') {
     const sel = e.target;
     if (sel.value !== 'custom') {
-      const pos = { bottom: { x: 0.5, y: 0.78 }, center: { x: 0.5, y: 0.5 }, top: { x: 0.5, y: 0.18 } }[sel.value] || { x: 0.5, y: 0.78 };
+      const pos = { bottom: { x: 0.12, y: 0.78 }, center: { x: 0.12, y: 0.5 }, top: { x: 0.12, y: 0.18 } }[sel.value] || { x: 0.12, y: 0.78 };
       const hx = document.getElementById('montageSubtitleX');
       const hy = document.getElementById('montageSubtitleY');
       if (hx) hx.value = String(pos.x);
       if (hy) hy.value = String(pos.y);
+      if (window.__projectOverlay) window.__projectOverlay.refresh();
     }
   }
 });
-
-function setupTranscribePreview() {
-  if (!transcribeIsVideo || !jobId) return;
-  const marks = [];
-  for (const s of (segments || [])) {
-    marks.push({ time: s.start });
-    marks.push({ time: s.end, cls: 'word' });
-  }
-  buildKeybar({
-    keybar: 'trPreviewKeybar', markers: 'trPreviewMarkers', playhead: 'trPreviewPlayhead',
-    video: 'transcribePreviewVideo', cur: 'trPreviewCur', dur: 'trPreviewDur'
-  }, marks);
-  document.getElementById('useInMontageBtn').disabled = false;
-  const seg = segments || [];
-  const plural = seg.length % 10 === 1 && seg.length % 100 !== 11 ? 'сегмент'
-    : seg.length % 10 >= 2 && seg.length % 10 <= 4 && (seg.length % 100 < 10 || seg.length % 100 >= 20) ? 'сегмента' : 'сегментов';
-  document.getElementById('trPreviewHint').textContent =
-    `${seg.length} ${plural} — точки таймлайна на полосе; клик — перемотка.`;
-}
-
-async function useInMontage() {
-  const btn = document.getElementById('useInMontageBtn');
-  btn.disabled = true;
-  btn.textContent = 'Создаю проект...';
-  const form = new FormData();
-  form.append('transcript_job_id', jobId);
-  let pid = null;
-  try {
-    const res = await fetch('/api/projects/link', { method: 'POST', body: form });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
-    pid = data.project_id;
-  } catch(e) {
-    btn.disabled = false;
-    btn.textContent = 'Использовать в монтаже';
-    document.getElementById('trPreviewHint').textContent = 'Не удалось создать проект: ' + e.message;
-    return;
-  }
-  try {
-    selectedProjectId = pid;
-    switchView('montage');
-    selectProject(pid, true);
-    document.getElementById('montageStartBtn').scrollIntoView({ behavior: 'smooth', block: 'center' });
-  } catch(e) {
-    document.getElementById('trPreviewHint').textContent = 'Ошибка перехода: ' + (e && e.message ? e.message : e);
-    btn.disabled = false;
-    btn.textContent = 'Использовать в монтаже';
-  }
-}
 
 async function refreshProjects() {
   let list = [];
@@ -1874,7 +1880,7 @@ async function refreshProjects() {
       </div>
     </div>`;
   }).join('');
-  if (!selectedProjectId && list.length) {
+  if (!selectedProjectId && list.length && !montageVideoFile) {
     const ready = list.find(p => p.transcript_status === 'done' && p.video_ok);
     if (ready) selectProject(ready.id, true);
   }
@@ -1883,6 +1889,7 @@ async function refreshProjects() {
 function selectProject(id, silent) {
   const p = projects.find(x => x.id === id);
   if (!p) return;
+  if (!silent) beginNewMontageInput();
   selectedProjectId = id;
   montageVideoFile = null;
   document.getElementById('montageFileName').textContent = '';
@@ -1894,12 +1901,12 @@ function selectProject(id, silent) {
   if (!silent) refreshProjects();
 }
 
-function clearProject() {
+function clearProject(skipRefresh = false) {
   selectedProjectId = null;
   document.getElementById('montageProjectSel').style.display = 'none';
   document.getElementById('montageStartBtn').disabled = !montageVideoFile;
   document.getElementById('projectPreviewCard').classList.remove('active');
-  refreshProjects();
+  if (!skipRefresh) refreshProjects();
 }
 
 async function deleteProject(id) {
@@ -2166,13 +2173,9 @@ async function refreshMontageStatus() {
   try {
     const res = await fetch('/api/montage/status', {cache: 'no-store'});
     const s = await res.json();
-    if (!montageJobId && s.jobs && s.jobs.length) {
-      const recoverable = [...s.jobs].reverse().find(job => job.status === 'done');
-      if (recoverable) {
-        montageJobId = recoverable.id;
-        localStorage.setItem('montageJobId', montageJobId);
-        startMontagePolling();
-      }
+    if (!montageInputDirty && s.jobs && s.jobs.length) {
+      const latest = s.jobs[s.jobs.length - 1];
+      if (latest && latest.id !== montageJobId) activateMontageJob(latest.id);
     }
     const row = document.getElementById('montageStatusRow');
     row.innerHTML = '';
@@ -2206,6 +2209,7 @@ async function refreshMontageStatus() {
 }
 
 async function startMontage() {
+  beginNewMontageInput();
   document.getElementById('montageStartBtn').disabled = true;
   document.getElementById('montageErrorBox').classList.remove('active');
   document.getElementById('montageMontageErrorBox') && document.getElementById('montageMontageErrorBox').classList.remove('active');
@@ -2278,6 +2282,7 @@ async function startMontage() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
     montageJobId = data.job_id;
+    montageInputDirty = false;
     localStorage.setItem('montageJobId', montageJobId);
     connectMontageWs();
     startMontagePolling();
@@ -2306,29 +2311,33 @@ function connectMontageWs() {
 }
 
 let montagePollTimer = null;
+let montageRefreshInFlight = false;
 function startMontagePolling() {
-  if (montagePollTimer || !montageJobId) return;
-  montagePollTimer = setInterval(refreshMontageResult, 1200);
+  if (montagePollTimer || !montageJobId || document.hidden || !document.getElementById('viewMontage').classList.contains('active')) return;
+  montagePollTimer = setInterval(refreshMontageResult, 2000);
   refreshMontageResult();
 }
 
-function montageUpdateProgress(progress, stage, detail) {
+function montageUpdateProgress(progress, stage, detail, refreshAfterTerminal = true) {
   const pct = Math.max(0, Math.min(100, Number(progress) || 0));
   document.getElementById('montageProgressBar').style.width = pct + '%';
   document.getElementById('montageProgressPercent').textContent = pct.toFixed(1) + '%';
   document.getElementById('montageProgressStage').textContent = detail || stage;
   document.getElementById('montageProgressDetail').textContent = detail || '';
-  if (stage === 'done' || stage === 'published' || stage === 'error') {
+  if (refreshAfterTerminal && (stage === 'done' || stage === 'published' || stage === 'error')) {
     setTimeout(refreshMontageResult, 600);
   }
 }
 
 async function refreshMontageResult() {
-  if (!montageJobId) return;
+  if (!montageJobId || montageRefreshInFlight || document.hidden) return;
+  const requestedJobId = montageJobId;
+  montageRefreshInFlight = true;
   try {
-    const res = await fetch(`/api/montage/result/${montageJobId}`);
+    const res = await fetch(`/api/montage/result/${requestedJobId}`);
     const data = await res.json();
-    montageUpdateProgress(data.progress || 0, data.stage || data.status, data.detail || '');
+    if (requestedJobId !== montageJobId) return;
+    montageUpdateProgress(data.progress || 0, data.stage || data.status, data.detail || '', false);
     if (data.selected_cover_id && !window.__selectedCoverId) {
       window.__selectedCoverId = data.selected_cover_id;
     }
@@ -2378,7 +2387,7 @@ async function refreshMontageResult() {
       const eX = document.getElementById('montageSubtitleX');
       const eS = document.getElementById('montageSubtitleScale');
       if (eY) eY.value = eY.value || '0.78';
-      if (eX) eX.value = eX.value || '0.50';
+      if (eX) eX.value = eX.value || '0.12';
       if (eS) eS.value = eS.value || '1.00';
 
       const tl = data.result.timeline;
@@ -2420,7 +2429,7 @@ async function refreshMontageResult() {
       }
     }
     if (data.publish_progress) renderPublishProgress(data.publish_progress);
-    if (data.publish) {
+    if (data.publish && !window.__forceNewPublication) {
       const box = document.getElementById('montagePublishResults');
       const modalBox = document.getElementById('montagePublishModalResults');
       box.innerHTML = '';
@@ -2453,11 +2462,14 @@ async function refreshMontageResult() {
         } else {
           publishButton.disabled = true;
           publishButton.textContent = 'Опубликовано';
+          document.getElementById('montageNewPublishBtn').style.display = '';
         }
       }
     }
   } catch(e) {
     montageError('Не удалось получить результат: ' + e.message);
+  } finally {
+    montageRefreshInFlight = false;
   }
 }
 
@@ -2509,18 +2521,21 @@ async function publishMontage() {
   form.append('targets_json', JSON.stringify(targets));
   form.append('title', title);
   form.append('text', text);
+  if (window.__forceNewPublication) form.append('new_publication', 'true');
   if (window.__selectedCoverId) form.append('cover_id', window.__selectedCoverId);
   document.getElementById('montagePublishBtn').disabled = true;
   document.getElementById('montagePublishBtn').textContent = 'Публикация...';
   document.getElementById('montagePublishError').classList.remove('active');
   const initialProgress = {};
   for (const checkbox of document.querySelectorAll('.publish-target-checkbox:checked')) {
-    initialProgress[checkbox.value] = {label:checkbox.parentElement.textContent.trim(),progress:0,status:'queued',detail:'В очереди'};
+    initialProgress[checkbox.value] = {label:checkbox.parentElement.textContent.trim(),progress:0,status:'preparing',detail:'Отправка запроса серверу'};
   }
   renderPublishProgress(initialProgress);
   document.getElementById('montageErrorBox').classList.remove('active');
+  const controller = new AbortController();
+  const requestTimeout = setTimeout(() => controller.abort(), 30000);
   try {
-    const res = await fetch(`/api/montage/${montageJobId}/publish`, { method: 'POST', body: form });
+    const res = await fetch(`/api/montage/${montageJobId}/publish`, { method: 'POST', body: form, signal: controller.signal });
     const data = await res.json();
     if (!res.ok) {
       publishWindowError(data.detail || 'Ошибка публикации');
@@ -2529,11 +2544,18 @@ async function publishMontage() {
       return;
     }
     connectMontageWs();
+    window.__forceNewPublication = false;
+    document.getElementById('montageNewPublishBtn').style.display = 'none';
     startMontagePolling();
   } catch(e) {
-    publishWindowError('Ошибка публикации: ' + e.message);
+    renderPublishProgress({});
+    publishWindowError(e.name === 'AbortError'
+      ? 'Сервер не ответил за 30 секунд. Обновите страницу и повторите публикацию.'
+      : 'Ошибка публикации: ' + e.message);
     document.getElementById('montagePublishBtn').disabled = false;
     document.getElementById('montagePublishBtn').textContent = 'Начать публикацию';
+  } finally {
+    clearTimeout(requestTimeout);
   }
 }
 
@@ -2545,6 +2567,19 @@ function openPublishWindow() {
   const video = document.getElementById('montageVideo');
   const slider = document.getElementById('montageCoverTime');
   slider.max = String(Math.max(0.1, Number(video.duration) || 1));
+}
+
+function startNewPublication() {
+  window.__forceNewPublication = true;
+  document.getElementById('montageNewPublishBtn').style.display = 'none';
+  document.getElementById('montagePublishResults').innerHTML = '';
+  document.getElementById('montagePublishModalResults').innerHTML = '';
+  document.getElementById('montagePublishLiveProgress').innerHTML = '';
+  document.getElementById('montagePublishError').classList.remove('active');
+  for (const checkbox of document.querySelectorAll('.publish-target-checkbox')) checkbox.checked = false;
+  const publishButton = document.getElementById('montagePublishBtn');
+  publishButton.disabled = false;
+  publishButton.textContent = 'Начать публикацию';
 }
 
 function closePublishWindow() {
@@ -2590,15 +2625,32 @@ function renderCoverState(state) {
   else if (state.cover_status === 'error') status.textContent = `Ошибка генерации: ${state.cover_error || state.cover_detail || ''}`;
   else if (covers.length) status.textContent = `Доступно обложек: ${covers.length}`;
   else status.textContent = 'Обложки не создавались';
-  document.getElementById('montageCoverGrid').innerHTML = covers.map(item => {
-    const url = `/api/montage/${encodeURIComponent(montageJobId)}/covers/${encodeURIComponent(item.file)}?t=${Date.now()}`;
-    const selected = item.id === window.__selectedCoverId;
-    return `<div class="cover-card ${selected ? 'selected' : ''}" onclick="openCoverZoom('${url}')">
-      <input class="cover-check" type="checkbox" ${selected ? 'checked' : ''} aria-label="Выбрать ${esc(item.name || item.id)}" onclick="event.stopPropagation();selectMontageCover('${esc(item.id)}')">
-      <img src="${url}" alt="${esc(item.name || 'Обложка')}" loading="lazy">
-      <div class="cover-name">${esc(item.name || item.id)}</div>
-    </div>`;
-  }).join('');
+  const grid = document.getElementById('montageCoverGrid');
+  const coverKey = `${montageJobId}:${covers.map(item => `${item.id}:${item.file}`).join('|')}`;
+  if (grid.dataset.coverKey !== coverKey) {
+    grid.dataset.coverKey = coverKey;
+    grid.innerHTML = covers.map(item => {
+      const assetUrl = `/api/montage/${encodeURIComponent(montageJobId)}/covers/${encodeURIComponent(item.file)}`;
+      return `<div class="cover-card" data-cover-id="${encodeURIComponent(item.id)}" data-full-url="${assetUrl}">
+        <input class="cover-check" type="checkbox" aria-label="Выбрать ${esc(item.name || item.id)}">
+        <img src="${assetUrl}?thumbnail=true" alt="${esc(item.name || 'Обложка')}" loading="lazy" decoding="async" width="360" height="640">
+        <div class="cover-name">${esc(item.name || item.id)}</div>
+      </div>`;
+    }).join('');
+    for (const card of grid.querySelectorAll('.cover-card')) {
+      const id = decodeURIComponent(card.dataset.coverId);
+      card.addEventListener('click', () => openCoverZoom(card.dataset.fullUrl));
+      card.querySelector('.cover-check').addEventListener('click', event => {
+        event.stopPropagation();
+        selectMontageCover(id);
+      });
+    }
+  }
+  for (const card of grid.querySelectorAll('.cover-card')) {
+    const selected = decodeURIComponent(card.dataset.coverId) === window.__selectedCoverId;
+    card.classList.toggle('selected', selected);
+    card.querySelector('.cover-check').checked = selected;
+  }
 }
 
 function selectMontageCover(id) {
@@ -2676,11 +2728,11 @@ updateSubtitlePreviewStyle();
 
 loadAnimationOptions();
 refreshProjects();
-if (montageJobId) startMontagePolling();
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && montageJobId) {
+  if (!document.hidden && montageJobId && document.getElementById('viewMontage').classList.contains('active')) {
     refreshMontageResult();
     connectMontageWs();
+    startMontagePolling();
   }
   if (!document.hidden && jobId) startTranscriptionPolling();
 });

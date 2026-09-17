@@ -510,7 +510,7 @@ def base_subtitle_render(output: str) -> dict[str, Any]:
         "video": DEFAULT_ZOOM_OUTPUT,
         "output": output,
         "font": None,
-        "position": {"x": 0.5, "y": 0.66, "anchor": "center"},
+        "position": {"x": 0.12, "y": 0.66, "anchor": "left"},
         "box": {
             "enabled": True,
             "max_width": 0.76,

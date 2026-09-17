@@ -163,7 +163,7 @@ class YouTubePublisher:
             "-c:v", "libx264", "-profile:v", "high", "-level:v", "4.1",
             "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
-            "-fps_mode", "cfr", "-avoid_negative_ts", "make_zero", "-shortest",
+            "-fps_mode", "cfr", "-shortest",
             "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output),
         ]
         with self.log_path.open("a", encoding="utf-8", errors="replace") as log:

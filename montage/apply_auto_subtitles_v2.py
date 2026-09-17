@@ -206,7 +206,6 @@ def start_ffmpeg(
         "-pix_fmt", "yuv420p",
         "-c:a", "copy",
         "-movflags", "+faststart",
-        "-shortest",
         str(output),
     ]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -243,8 +242,23 @@ def render_subtitle_on_frame(
     if uppercase:
         tokens = [{**token, "text": token["text"].upper()} for token in tokens]
 
+    padding_x = int(box_cfg.get("padding_x", 24))
+    padding_y = int(box_cfg.get("padding_y", 16))
+    anchor = str(position.get("anchor", "center")).strip().lower()
+    x_value = float(position.get("x", 0.5))
+    y_value = float(position.get("y", 0.78))
+    anchor_x = int(width * x_value) if x_value <= 1.0 else int(x_value)
+    center_y = int(height * y_value) if y_value <= 1.0 else int(y_value)
+    anchor_x = max(0, min(width - 1, anchor_x))
+
     max_width_value = float(box_cfg.get("max_width", 0.86))
-    max_width_px = int(width * max_width_value) if max_width_value <= 1.0 else int(max_width_value)
+    configured_max_width = int(width * max_width_value) if max_width_value <= 1.0 else int(max_width_value)
+    if anchor == "left":
+        available_block_w = max(1, width - anchor_x)
+        max_width_px = min(configured_max_width, max(1, available_block_w - padding_x * 2))
+    else:
+        available_block_w = width
+        max_width_px = configured_max_width
 
     base_img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGBA))
     measure = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
@@ -261,17 +275,13 @@ def render_subtitle_on_frame(
     block_text_w = max(line_widths) if line_widths else 0
     block_text_h = line_height * len(lines)
 
-    padding_x = int(box_cfg.get("padding_x", 24))
-    padding_y = int(box_cfg.get("padding_y", 16))
-    block_w = min(width, block_text_w + padding_x * 2)
+    block_w = min(available_block_w, block_text_w + padding_x * 2)
     block_h = block_text_h + padding_y * 2
 
-    x_value = float(position.get("x", 0.5))
-    y_value = float(position.get("y", 0.78))
-    center_x = int(width * x_value) if x_value <= 1.0 else int(x_value)
-    center_y = int(height * y_value) if y_value <= 1.0 else int(y_value)
-
-    x0 = max(0, min(width - block_w, center_x - block_w // 2))
+    if anchor == "left":
+        x0 = anchor_x
+    else:
+        x0 = max(0, min(width - block_w, anchor_x - block_w // 2))
     y0 = max(0, min(height - block_h, center_y - block_h // 2))
     x1 = x0 + block_w
     y1 = y0 + block_h
@@ -286,7 +296,7 @@ def render_subtitle_on_frame(
 
     y = padding_y
     for line, line_w in zip(lines, line_widths):
-        x = (block_w - line_w) // 2
+        x = max(padding_x, (block_w - line_w) // 2)
         for idx, token in enumerate(line):
             text = token["text"]
             if idx < len(line) - 1:
@@ -325,10 +335,11 @@ def render_subtitle_on_frame(
     overlay = Image.new("RGBA", base_img.size, (0, 0, 0, 0))
     if abs(rotation) > 0.001:
         rendered_block = block.rotate(-rotation, expand=True, resample=Image.BICUBIC)
+        rotated_x = x0 if anchor == "left" else int(anchor_x - rendered_block.width / 2)
         composite_clipped(
             overlay,
             rendered_block,
-            int(center_x - rendered_block.width / 2),
+            rotated_x,
             int(center_y - rendered_block.height / 2),
         )
     else:
@@ -412,6 +423,7 @@ def main() -> None:
     subtitle_index = 0
     rendered = 0
     frame_index = 0
+    last_decoded_frame: np.ndarray | None = None
 
     try:
         while True:
@@ -419,7 +431,12 @@ def main() -> None:
                 break
             ok, frame = cap.read()
             if not ok:
-                break
+                missing = total_frames - frame_index if total_frames else 0
+                if last_decoded_frame is None or missing <= 0 or missing > max(1, int(round(fps))):
+                    break
+                frame = last_decoded_frame.copy()
+            else:
+                last_decoded_frame = frame.copy()
 
             t = frame_index / fps
             while subtitle_index < len(subtitles) and subtitles[subtitle_index]["end"] <= t:

@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
-from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -571,7 +571,10 @@ def export_tsv(segments, show_speakers=True, show_timecodes=True):
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return (BASE_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(
+        (BASE_DIR / "templates" / "index.html").read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/manifest.json")
@@ -581,7 +584,10 @@ async def manifest():
 
 @app.get("/service-worker.js")
 async def service_worker():
-    return FileResponse(path=str(BASE_DIR / "static" / "sw.js"), media_type="application/javascript")
+    return FileResponse(
+        path=str(BASE_DIR / "static" / "sw.js"), media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.post("/api/upload")
@@ -637,6 +643,46 @@ async def register_video_project(job_id: str) -> Optional[str]:
 
 # ---------------- Thumbs & Video preview ----------------
 
+def _video_response(path: Path, request: Request, media_type: str):
+    total = path.stat().st_size
+    range_header = request.headers.get("range", "")
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600"}
+    if not range_header:
+        return FileResponse(str(path), media_type=media_type, filename=path.name, headers=headers)
+
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+    if not match or (not match.group(1) and not match.group(2)):
+        raise HTTPException(416, "Invalid byte range", headers={"Content-Range": f"bytes */{total}"})
+    if match.group(1):
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else total - 1
+    else:
+        suffix_size = int(match.group(2))
+        start = max(0, total - suffix_size)
+        end = total - 1
+    if start >= total or start > end:
+        raise HTTPException(416, "Invalid byte range", headers={"Content-Range": f"bytes */{total}"})
+    end = min(end, total - 1)
+    length = end - start + 1
+
+    def stream():
+        with path.open("rb") as source:
+            source.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = source.read(min(1 << 20, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    headers.update({
+        "Content-Range": f"bytes {start}-{end}/{total}",
+        "Content-Length": str(length),
+        "Content-Disposition": f'inline; filename="{path.name}"',
+    })
+    return StreamingResponse(stream(), status_code=206, media_type=media_type, headers=headers)
+
 def _thumb_path(job_id: str) -> Path:
     return UPLOAD_DIR / f"{job_id}.thumb.jpg"
 
@@ -674,7 +720,7 @@ async def serve_thumb(job_id: str):
 
 
 @app.get("/api/video/{job_id}")
-async def serve_video(job_id: str):
+async def serve_video(job_id: str, request: Request):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
@@ -686,8 +732,7 @@ async def serve_video(job_id: str):
         ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
         ".webm": "video/webm", ".avi": "video/x-msvideo", ".mkv": "video/x-matroska",
     }.get(video.suffix.lower(), "video/mp4")
-    return FileResponse(str(video), media_type=media, filename=video.name,
-                        headers={"Accept-Ranges": "bytes"})
+    return _video_response(video, request, media)
 
 
 @app.post("/api/projects/link")
@@ -1068,10 +1113,12 @@ async def process_cover_suggestions(job_id: str) -> None:
         job["cover_progress"] = 100
         job["cover_detail"] = f"Обложки готовы: {len(items)}"
         await _store_project_covers(job_id)
+        _save_montage_job(job_id)
     except Exception as exc:
         job["cover_status"] = "error"
         job["cover_error"] = str(exc)
         job["cover_detail"] = str(exc)
+        _save_montage_job(job_id)
         print(f"[covers] job {job_id} failed: {traceback.format_exc()}", file=sys.stderr)
 
 
@@ -1099,10 +1146,12 @@ async def process_custom_cover(job_id: str, timestamp: float, title: str) -> Non
         job["cover_progress"] = 100
         job["cover_detail"] = "Новая обложка готова"
         await _store_project_covers(job_id)
+        _save_montage_job(job_id)
     except Exception as exc:
         job["cover_status"] = "error"
         job["cover_error"] = str(exc)
         job["cover_detail"] = str(exc)
+        _save_montage_job(job_id)
 
 
 async def process_publish(job_id: str, targets: list):
@@ -1423,6 +1472,7 @@ async def publish_montage(
     title: str = Form(""),
     text: str = Form(""),
     cover_id: str = Form(""),
+    new_publication: bool = Form(False),
 ):
     if job_id not in jobs or jobs[job_id].get("kind") != "montage":
         raise HTTPException(404, "Montage job not found")
@@ -1451,10 +1501,11 @@ async def publish_montage(
     unknown = [target_id for target_id in target_ids if target_id not in target_specs]
     if unknown:
         raise HTTPException(400, f"Неизвестные цели публикации: {', '.join(unknown)}")
-    already_published = set((job.get("publish") or {}).keys())
-    target_ids = [target_id for target_id in target_ids if target_id not in already_published]
-    if not target_ids:
-        raise HTTPException(400, "Все выбранные цели уже успешно опубликованы")
+    if not new_publication:
+        already_published = set((job.get("publish") or {}).keys())
+        target_ids = [target_id for target_id in target_ids if target_id not in already_published]
+        if not target_ids:
+            raise HTTPException(400, "Все выбранные цели уже успешно опубликованы")
     if any(target_id.startswith("youtube") for target_id in target_ids) and not title.strip():
         raise HTTPException(400, "Для YouTube укажите заголовок")
     targets = []
@@ -1511,7 +1562,7 @@ async def montage_result(job_id: str):
 
 
 @app.get("/api/montage/{job_id}/covers/{filename}")
-async def montage_cover_asset(job_id: str, filename: str):
+async def montage_cover_asset(job_id: str, filename: str, thumbnail: bool = False):
     if job_id not in jobs or jobs[job_id].get("kind") != "montage":
         raise HTTPException(404, "Montage job not found")
     safe_name = Path(filename).name
@@ -1519,7 +1570,27 @@ async def montage_cover_asset(job_id: str, filename: str):
     if safe_name not in allowed:
         raise HTTPException(404, "Обложка не найдена")
     path = MONTAGE_WORK / job_id / "covers" / safe_name
-    return FileResponse(str(path), media_type="image/png")
+    media_type = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+    }.get(path.suffix.lower(), "image/png")
+    if thumbnail:
+        from PIL import Image
+        thumbnail_dir = path.parent / ".thumbnails"
+        thumbnail_dir.mkdir(exist_ok=True)
+        thumbnail_path = thumbnail_dir / f"{path.stem}.jpg"
+        if not thumbnail_path.is_file() or thumbnail_path.stat().st_mtime < path.stat().st_mtime:
+            temporary = thumbnail_dir / f".{path.stem}.{uuid.uuid4().hex[:8]}.tmp.jpg"
+            with Image.open(path) as image:
+                image.convert("RGB").resize((360, 640), Image.Resampling.LANCZOS).save(
+                    temporary, "JPEG", quality=82, optimize=True
+                )
+            os.replace(temporary, thumbnail_path)
+        path = thumbnail_path
+        media_type = "image/jpeg"
+    return FileResponse(
+        str(path), media_type=media_type,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.post("/api/montage/{job_id}/covers/upload")
@@ -1542,6 +1613,7 @@ async def upload_montage_cover(job_id: str, cover: UploadFile = File(...)):
     jobs[job_id]["covers"] = items
     jobs[job_id]["cover_status"] = "done"
     await _store_project_covers(job_id)
+    _save_montage_job(job_id)
     return {"covers": items}
 
 
@@ -1554,6 +1626,13 @@ async def generate_montage_cover(job_id: str, timestamp: float = Form(...), titl
         raise HTTPException(400, "Название обложки должно содержать 1–100 символов")
     if jobs[job_id].get("cover_status") == "generating":
         raise HTTPException(409, "Генерация обложки уже выполняется")
+    jobs[job_id].update(
+        cover_status="generating",
+        cover_progress=0,
+        cover_detail="Создание обложки из стоп-кадра",
+        cover_error=None,
+    )
+    _save_montage_job(job_id)
     asyncio.create_task(process_custom_cover(job_id, max(0, timestamp), title))
     return {"status": "generating"}
 
@@ -1572,7 +1651,7 @@ async def montage_download(job_id: str):
 
 
 @app.get("/api/montage/preview/{job_id}")
-async def montage_preview(job_id: str):
+async def montage_preview(job_id: str, request: Request):
     if job_id not in jobs or jobs[job_id].get("kind") != "montage":
         raise HTTPException(404, "Montage job not found")
     result = jobs[job_id].get("result")
@@ -1581,7 +1660,7 @@ async def montage_preview(job_id: str):
     video = Path(result.get("preview_video") or result["result_video"])
     if not video.exists():
         raise HTTPException(404, "Файл не найден")
-    return FileResponse(path=str(video), media_type="video/mp4", filename=video.name, content_disposition_type="inline")
+    return _video_response(video, request, "video/mp4")
 
 
 @app.get("/api/montage/animations")
