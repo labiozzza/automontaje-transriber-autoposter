@@ -1,4 +1,4 @@
-import os, json, uuid, asyncio, subprocess, time, re, tempfile, hashlib, urllib.request, importlib, threading, gc
+import os, json, uuid, asyncio, subprocess, time, re, tempfile, hashlib, urllib.request, importlib, threading, gc, sys
 import shutil
 import traceback
 from pathlib import Path
@@ -1107,6 +1107,7 @@ async def process_cover_suggestions(job_id: str) -> None:
             str(job.get("srt_text") or ""),
             MONTAGE_WORK / job_id / "covers",
             progress,
+            str(job.get("cover_title") or ""),
         )
         job["covers"] = items
         job["cover_status"] = "done"
@@ -1340,6 +1341,7 @@ async def start_montage(
     animation_item_size: int = Form(72),
     animation_bar: bool = Form(False),
     propose_cover: bool = Form(False),
+    cover_title: str = Form(""),
     zoom_timeline_json: Optional[str] = Form(None),
 ):
     job_id = str(uuid.uuid4())[:8]
@@ -1388,6 +1390,9 @@ async def start_montage(
 
     if not srt_text:
         raise HTTPException(400, "Нет текста для субтитров (загрузите SRT или выберите проект с транскрибацией)")
+    cover_title = cover_title.strip()
+    if len(cover_title) > 100:
+        raise HTTPException(400, "Название обложки должно быть не длиннее 100 символов")
 
     zoom_override = None
     if zoom_timeline_json and zoom_timeline_json.strip():
@@ -1417,6 +1422,7 @@ async def start_montage(
         "cover_progress": 0,
         "cover_detail": "",
         "cover_error": None,
+        "cover_title": cover_title,
     }
     params = {
         "subtitle_mode": subtitle_mode,
@@ -1533,6 +1539,41 @@ async def publish_montage(
     _save_montage_job(job_id)
     asyncio.create_task(process_publish(job_id, targets))
     return {"job_id": job_id, "status": "publishing", "targets": [t.get("kind") for t in targets]}
+
+
+_youtube_reauth_state: dict[str, str] = {"status": "idle", "detail": ""}
+
+
+@app.post("/api/montage/youtube-reauth")
+async def youtube_reauth():
+    if _youtube_reauth_state["status"] in {"running"}:
+        raise HTTPException(409, "Повторная авторизация уже выполняется")
+    _youtube_reauth_state.update(status="running", detail="Открытие браузера...")
+
+    def run() -> None:
+        try:
+            from montage.youtube_publisher import YouTubePublisher
+            from montage.secrets_env import load_secrets_env
+            load_secrets_env()
+            workdir = MONTAGE_WORK / "youtube_reauth"
+            workdir.mkdir(parents=True, exist_ok=True)
+            youtube = YouTubePublisher(
+                montage_engine.INSTAPOSTER_DIR,
+                Path(sys.executable),
+                workdir / "youtube.log",
+            )
+            youtube.reauth()
+            _youtube_reauth_state.update(status="ok", detail="Авторизация YouTube обновлена")
+        except Exception as exc:
+            _youtube_reauth_state.update(status="error", detail=str(exc))
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"status": "running"}
+
+
+@app.get("/api/montage/youtube-reauth")
+async def youtube_reauth_status():
+    return dict(_youtube_reauth_state)
 
 
 @app.get("/api/montage/result/{job_id}")

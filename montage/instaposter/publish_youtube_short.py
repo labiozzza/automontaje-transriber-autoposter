@@ -48,19 +48,36 @@ def get_credentials():
                 f"Не найден файл OAuth:\n{CLIENT_SECRET_FILE}"
             )
 
-        flow = InstalledAppFlow.from_client_secrets_file(
-            CLIENT_SECRET_FILE,
-            SCOPES
+        if os.path.exists(TOKEN_FILE):
+            os.unlink(TOKEN_FILE)
+
+        creds = run_local_oauth()
+
+    return creds
+
+
+def run_local_oauth():
+    if not os.path.exists(CLIENT_SECRET_FILE):
+        raise FileNotFoundError(
+            f"Не найден файл OAuth:\n{CLIENT_SECRET_FILE}"
         )
 
-        creds = flow.run_local_server(
-            port=0,
-            access_type="offline",
-            prompt="consent"
-        )
+    flow = InstalledAppFlow.from_client_secrets_file(
+        CLIENT_SECRET_FILE,
+        SCOPES,
+        redirect_uri="http://localhost"
+    )
 
-        with open(TOKEN_FILE, "w", encoding="utf-8") as token:
-            token.write(creds.to_json())
+    creds = flow.run_local_server(
+        port=0,
+        access_type="offline",
+        prompt="consent",
+        authorization_prompt_message="",
+        success_message="Авторизация YouTube завершена! Это окно можно закрыть."
+    )
+
+    with open(TOKEN_FILE, "w", encoding="utf-8") as token:
+        token.write(creds.to_json())
 
     return creds
 

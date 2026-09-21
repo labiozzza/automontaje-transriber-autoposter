@@ -80,6 +80,8 @@ h1 {
 .badge.ok { background: rgba(0,184,148,0.15); color: var(--green); }
 .badge.no { background: rgba(225,112,85,0.15); color: var(--red); }
 .badge.up { background: rgba(167,139,250,0.15); color: var(--accent2); }
+.badge-link { background: rgba(167,139,250,0.15); color: var(--accent2); border: 1px solid rgba(167,139,250,0.4); border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 700; cursor: pointer; margin-right: 4px; }
+.badge-link:hover { background: rgba(167,139,250,0.3); }
 .montage-status-row {
   display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center;
   font-size: 13px; color: var(--text2); margin-bottom: 8px;
@@ -1033,7 +1035,8 @@ select option { background: var(--surface2); }
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Предложить обложку</div>
-            <div class="toggle-desc">Параллельно с монтажом Big Pickle создаст 4 обложки через gpt_imagegen</div>
+            <div class="toggle-desc">BigPickle придумает 4 заголовка, изображения соберутся локально; ручной заголовок добавит пятый вариант</div>
+            <input id="montageAutoCoverTitle" maxlength="100" placeholder="Свой заголовок для пятой обложки (необязательно)" style="margin-top:8px">
           </div>
           <label class="toggle">
             <input type="checkbox" id="montageProposeCover">
@@ -1196,7 +1199,7 @@ select option { background: var(--surface2); }
             <div class="publish-field-head"><label for="montageCoverTime">Стоп-кадр</label><span id="montageCoverTimeLabel">00:00.000</span></div>
             <input id="montageCoverTime" type="range" min="0" max="1" step="0.1" value="0" oninput="previewCoverFrame()" style="width:100%">
             <input id="montageCoverTitle" maxlength="100" placeholder="Название на обложке" style="margin-top:10px">
-            <button class="btn btn-primary" type="button" id="generateCoverBtn" style="margin-top:10px" onclick="generateStopFrameCover()">Создать через ChatGPT</button>
+            <button class="btn btn-primary" type="button" id="generateCoverBtn" style="margin-top:10px" onclick="generateStopFrameCover()">Создать локально</button>
           </div>
         </div>
         <div class="toggle-desc" style="margin-top:12px">Порядок Instagram: пробное → пробное перевёрнутое → основная лента → основная лента перевёрнутое. YouTube публикуется параллельно.</div>
@@ -2188,6 +2191,7 @@ async function refreshMontageStatus() {
       `<span class="badge ${s.publishers.instagram_reels ? 'ok' : 'no'}">Instagram: ${s.publishers.instagram_reels ? 'ок' : 'нет'}</span>` +
       `<span class="badge ${s.publishers.threads ? 'ok' : 'no'}">Threads: ${s.publishers.threads ? 'ок' : 'нет'}</span>` +
       `<span class="badge ${s.publishers.youtube ? 'ok' : 'no'}">YouTube: ${s.publishers.youtube ? 'ок' : 'нет'}</span>` +
+      `<button class="badge-link" id="youtubeReauthBtn" onclick="startYouTubeReauth()" title="Открыть браузер и заново авторизовать YouTube">YouTube ↻</button>` +
       `<span class="badge ${s.publishers.telegram ? 'ok' : 'no'}">Telegram: ${s.publishers.telegram ? 'ок' : 'нет'}</span>`;
     document.getElementById('montageStatusDetail').textContent =
       `Анимации: ${(s.animations || []).map(a => a.name).join(', ') || 'нет'}`;
@@ -2205,6 +2209,51 @@ async function refreshMontageStatus() {
     }
   } catch(e) {
     document.getElementById('montageStatusRow').textContent = 'Статус недоступен: ' + e.message;
+  }
+}
+
+async function startYouTubeReauth() {
+  const btn = document.getElementById('youtubeReauthBtn');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = 'YouTube …';
+  try {
+    const res = await fetch('/api/montage/youtube-reauth', { method: 'POST' });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || ('HTTP ' + res.status));
+    }
+    alert('Браузер открыт. Подтвердите доступ YouTube в браузере — авторизация обновится автоматически.');
+    const started = Date.now();
+    const poll = setInterval(async () => {
+      try {
+        const status = await (await fetch('/api/montage/youtube-reauth')).json();
+        if (status.status === 'ok') {
+          clearInterval(poll);
+          btn.textContent = 'YouTube ↻';
+          btn.disabled = false;
+          refreshMontageStatus();
+          alert('Авторизация YouTube обновлена.');
+        } else if (status.status === 'error') {
+          clearInterval(poll);
+          btn.textContent = 'YouTube ↻';
+          btn.disabled = false;
+          alert('Не удалось обновить авторизацию: ' + (status.detail || 'ошибка'));
+        } else if (Date.now() - started > 600000) {
+          clearInterval(poll);
+          btn.textContent = 'YouTube ↻';
+          btn.disabled = false;
+        }
+      } catch (e) {
+        clearInterval(poll);
+        btn.textContent = 'YouTube ↻';
+        btn.disabled = false;
+      }
+    }, 3000);
+  } catch (e) {
+    btn.textContent = 'YouTube ↻';
+    btn.disabled = false;
+    alert('Ошибка при запуске повторной авторизации: ' + e.message);
   }
 }
 
@@ -2252,6 +2301,7 @@ async function startMontage() {
   form.append('autozoom', document.getElementById('montageAutozoom').checked);
   form.append('mirror_horizontal', document.getElementById('montageMirrorHorizontal').checked);
   form.append('propose_cover', document.getElementById('montageProposeCover').checked);
+  form.append('cover_title', document.getElementById('montageAutoCoverTitle').value.trim());
   form.append('subtitles', true);
   form.append('bigpickle', document.getElementById('montageBigpickle').checked);
 

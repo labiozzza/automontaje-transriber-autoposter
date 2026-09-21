@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
 import random
+import re
 import shutil
 import subprocess
-import time
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -13,8 +12,6 @@ from typing import Callable
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 
-OPENCODE = os.environ.get("OPENCODE_BIN", "").strip() or shutil.which("opencode") or "opencode"
-MODEL = os.environ.get("COVER_MODEL", "opencode/big-pickle")
 COVER_SIZE = (1080, 1920)
 FONT_PATH = Path(__file__).resolve().parent / "fonts" / "Comfortaa.ttf"
 
@@ -116,47 +113,76 @@ def _finish_generated_cover(path: Path, title: str) -> None:
     temporary.replace(path)
 
 
-def _cover_titles(path: Path, transcript: str, count: int) -> list[str]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        candidates = data.get("titles", []) if isinstance(data, dict) else data
-    except (OSError, json.JSONDecodeError):
-        candidates = []
-    if not isinstance(candidates, list):
-        candidates = []
-    titles = [str(item).strip() for item in candidates if str(item).strip()][:count]
-    words = transcript.split()
-    while len(titles) < count:
-        start = len(words) * len(titles) // max(1, count)
-        fallback = " ".join(words[start:start + 5]).strip(" .,!?:;—-") or "Новый взгляд"
-        titles.append(fallback)
+def _auto_titles(transcript: str, count: int) -> list[str]:
+    lines = []
+    for raw in transcript.splitlines():
+        line = re.sub(r"<[^>]+>", " ", raw).strip()
+        if not line or line.isdigit() or "-->" in line:
+            continue
+        line = re.sub(r"^[A-ZА-ЯЁ][A-ZА-ЯЁ0-9 _-]{1,24}:\s*", "", line)
+        lines.append(line)
+    text = re.sub(r"\s+", " ", " ".join(lines)).strip()
+    chunks = [chunk.strip(" .,!?:;—-\"'«»") for chunk in re.split(r"[.!?;]+", text) if chunk.strip()]
+    phrases = []
+    for chunk in chunks:
+        words = re.findall(r"[A-Za-zА-Яа-яЁё0-9-]+", chunk)
+        lowered = [word.lower() for word in words]
+        for prefix in (("сегодня", "мы"), ("сейчас", "мы"), ("в", "этом", "видео"), ("в", "этом", "ролике"), ("давайте",)):
+            if lowered[:len(prefix)] == list(prefix):
+                words = words[len(prefix):]
+                break
+        if len(words) >= 3:
+            phrases.append(" ".join(words[:5]))
+    if not phrases:
+        phrases = ["главное в этом ролике"]
+
+    hooks = (
+        "Главное: {phrase}",
+        "Вот где ошибка: {phrase}",
+        "Это меняет всё: {phrase}",
+        "Об этом обычно молчат: {phrase}",
+    )
+    titles = []
+    for index in range(count):
+        phrase = phrases[min(len(phrases) - 1, index * len(phrases) // count)].lower()
+        title = hooks[index % len(hooks)].format(phrase=phrase)
+        titles.append(title[:100].rstrip(" .,!?:;—-"))
     return titles
 
 
-def _run_agent(prompt: str, workdir: Path, log_path: Path, expected: list[Path], progress: Callable[[float, str], None]) -> None:
-    command = [
-        OPENCODE, "run", prompt, "-m", MODEL, "--auto", "--format", "json", "--dir", str(workdir),
-    ]
-    with log_path.open("w", encoding="utf-8", errors="replace") as log:
-        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
-        last_count = -1
-        deadline = time.monotonic() + float(os.environ.get("COVER_GENERATION_TIMEOUT", "1200"))
-        while process.poll() is None:
-            if time.monotonic() >= deadline:
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                raise TimeoutError("Генерация обложек превысила лимит времени")
-            count = sum(path.exists() for path in expected)
-            if count != last_count:
-                last_count = count
-                progress(15 + count / max(1, len(expected)) * 80, f"Создано обложек: {count}/{len(expected)}")
-            time.sleep(2)
-        code = process.wait()
-    if code != 0:
-        raise RuntimeError(f"Big Pickle завершился с кодом {code}; см. {log_path.name}")
+def _bigpickle_titles(transcript: str, count: int) -> list[str]:
+    from .generate_configs_from_transcript_srt import _extract_text_from_ndjson, _run_opencode, extract_json_object
+
+    prompt = f"""Придумай ровно {count} разных кликбейтных заголовка для обложек короткого вертикального видео по транскрипции ниже.
+
+Требования:
+- русский язык;
+- каждый заголовок содержит 3-7 слов и не длиннее 100 символов;
+- передай смысл конкретно этого ролика, не используй универсальные пустые фразы;
+- варианты должны отражать разные сильные мысли из разных частей ролика;
+- без CAPS LOCK, эмодзи, кавычек, точки в конце и лишних восклицательных знаков;
+- не вызывай инструменты, не создавай изображения и файлы;
+- ответь только JSON-объектом: {{"titles":["...", "...", "...", "..."]}}.
+
+ТРАНСКРИПЦИЯ:
+---
+{transcript}
+---"""
+    raw = _run_opencode(prompt)
+    payload = extract_json_object(_extract_text_from_ndjson(raw)) or extract_json_object(raw)
+    candidates = payload.get("titles") if isinstance(payload, dict) else None
+    if not isinstance(candidates, list):
+        raise RuntimeError("BigPickle не вернул список заголовков")
+    titles = [str(item).strip() for item in candidates if str(item).strip()]
+    if len(titles) != count or any(len(title) > 100 for title in titles):
+        raise RuntimeError("BigPickle вернул некорректные заголовки")
+    return titles
+
+
+def _make_local_cover(frame: Path, output: Path, title: str) -> None:
+    with Image.open(frame) as source:
+        source.convert("RGB").save(output, "PNG")
+    _finish_generated_cover(output, title)
 
 
 def _manifest_items(covers_dir: Path) -> list[dict[str, str]]:
@@ -172,57 +198,45 @@ def _save_manifest(covers_dir: Path, items: list[dict[str, str]]) -> None:
     (covers_dir / "manifest.json").write_text(json.dumps({"covers": items}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def generate_suggested_covers(job_id: str, video: Path, transcript: str, covers_dir: Path, progress: Callable[[float, str], None]) -> list[dict[str, str]]:
+def generate_suggested_covers(
+    job_id: str,
+    video: Path,
+    transcript: str,
+    covers_dir: Path,
+    progress: Callable[[float, str], None],
+    manual_title: str = "",
+) -> list[dict[str, str]]:
     covers_dir.mkdir(parents=True, exist_ok=True)
     frames_dir = covers_dir / "frames"
     frames_dir.mkdir(exist_ok=True)
     duration = _duration(video)
     rng = random.Random(job_id)
     low, high = min(1.0, duration * 0.1), max(min(1.0, duration * 0.1), duration * 0.9)
-    timestamps = sorted(rng.uniform(low, high) for _ in range(4))
+    count = 5 if manual_title.strip() else 4
+    progress(3, "BigPickle придумывает заголовки")
+    try:
+        titles = _bigpickle_titles(transcript, 4)
+    except Exception as exc:
+        (covers_dir / "title_generation_error.log").write_text(str(exc), encoding="utf-8")
+        titles = _auto_titles(transcript, 4)
+        progress(8, "BigPickle недоступен, использованы локальные заголовки")
+    timestamps = sorted(rng.uniform(low, high) for _ in range(count))
     frames = [extract_frame(video, timestamp, frames_dir / f"frame_{index + 1:02d}.jpg") for index, timestamp in enumerate(timestamps)]
     progress(12, "Стоп-кадры подготовлены")
-    outputs = [covers_dir / f"suggested_{index + 1:02d}.png" for index in range(4)]
-    titles_path = covers_dir / "suggested_titles.json"
-    calls = "\n".join(
-        f"{index + 1}. images=['{frame}']; out='{output}'; quality='medium'; size='1088x1920'."
-        for index, (frame, output) in enumerate(zip(frames, outputs))
-    )
-    prompt = f"""Ты создаёшь четыре разные обложки для Instagram Reels. Используй инструмент gpt_imagegen ровно четыре раза, один раз для каждого пункта ниже. Каждый исходный кадр передавай через images как Image 1.
-
-ТРЕБОВАНИЯ К КАЖДОЙ ОБЛОЖКЕ:
-- это вертикальная обложка Instagram Reels, рассчитанная на просмотр в ленте телефона;
-- сохрани человека, предметы и узнаваемость исходного кадра;
-- визуальный стиль спокойный и сдержанный: естественный свет, умеренный контраст, приглушённые натуральные цвета;
-- исключи неон, чрезмерную насыщенность, пересветы, агрессивный HDR и кричащие цветовые акценты;
-- НЕ РИСУЙ на изображении текст, буквы, логотипы или watermark: приложение добавит заголовок само;
-- придумай для каждого варианта отдельный короткий заголовок на русском из 3–5 слов, без CAPS LOCK и лишних восклицательных знаков;
-- до завершения сохрани точные четыре заголовка в UTF-8 JSON-файл `{titles_path}` в формате {{"titles": ["...", "...", "...", "..."]}};
-- в prompt каждого gpt_imagegen явно повтори требования к спокойному фону без любого текста.
-
-TOOL-ВЫЗОВЫ И ФАЙЛЫ:
-{calls}
-
-ПОЛНАЯ ТРАНСКРИБАЦИЯ РОЛИКА:
----
-{transcript}
----
-
-Не останавливайся после первого изображения. Создай все четыре файла. После четырёх tool-вызовов ответь кратко."""
-    _run_agent(prompt, covers_dir, covers_dir / "generation.log", outputs, progress)
-    existing = [path for path in outputs if path.exists()]
-    if not existing:
-        raise RuntimeError("Big Pickle не создал ни одной обложки")
-    titles = _cover_titles(titles_path, transcript, len(existing))
-    for path, title in zip(existing, titles):
-        _finish_generated_cover(path, title)
+    outputs = [covers_dir / f"suggested_{index + 1:02d}.png" for index in range(count)]
+    if manual_title.strip():
+        titles.append(manual_title.strip())
+    for index, (frame, output, title) in enumerate(zip(frames, outputs, titles)):
+        _make_local_cover(frame, output, title)
+        progress(15 + (index + 1) / count * 80, f"Создано обложек: {index + 1}/{count}")
     items = _manifest_items(covers_dir)
     known = {item.get("file") for item in items}
-    for index, path in enumerate(existing):
+    for index, path in enumerate(outputs):
         if path.name not in known:
-            items.append({"id": path.stem, "file": path.name, "name": titles[index], "source": "generated"})
+            source = "manual" if manual_title.strip() and index == 4 else "generated"
+            items.append({"id": path.stem, "file": path.name, "name": titles[index], "source": source})
     _save_manifest(covers_dir, items)
-    progress(100, f"Обложки готовы: {len(existing)}")
+    progress(100, f"Обложки готовы: {len(outputs)}")
     return items
 
 
@@ -232,11 +246,7 @@ def generate_custom_cover(video: Path, timestamp: float, title: str, covers_dir:
     frame = extract_frame(video, timestamp, covers_dir / "frames" / f"{cover_id}.jpg")
     output = covers_dir / f"{cover_id}.png"
     progress(15, "Стоп-кадр подготовлен")
-    prompt = f"""Вызови gpt_imagegen ровно один раз. Image 1 — стоп-кадр ролика. Создай вертикальный фон обложки Instagram Reels, сохрани узнаваемость кадра. Стиль спокойный и сдержанный: естественный свет, умеренный контраст, приглушённые натуральные цвета. Исключи неон, чрезмерную насыщенность, пересветы и агрессивный HDR. НЕ РИСУЙ текст, буквы, логотипы или watermark: приложение добавит заголовок само. Параметры: images=['{frame}']; out='{output}'; quality='medium'; size='1088x1920'."""
-    _run_agent(prompt, covers_dir, covers_dir / f"{cover_id}.log", [output], progress)
-    if not output.exists():
-        raise RuntimeError("Обложка не создана")
-    _finish_generated_cover(output, title)
+    _make_local_cover(frame, output, title)
     items = _manifest_items(covers_dir)
     items.append({"id": cover_id, "file": output.name, "name": title, "source": "custom"})
     _save_manifest(covers_dir, items)

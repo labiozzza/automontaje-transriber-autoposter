@@ -19,6 +19,17 @@ from typing import Any, Callable
 
 from PIL import Image, ImageOps
 
+try:
+    import certifi
+except Exception:  # pragma: no cover - env without certifi
+    certifi = None
+
+
+def _ca_bundle() -> str:
+    if certifi is not None:
+        return certifi.where()
+    return ""
+
 
 class YouTubePublisher:
     def __init__(self, instaposter_dir: Path, python: Path, log_path: Path) -> None:
@@ -37,7 +48,8 @@ class YouTubePublisher:
         upload_ready: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         command = [str(self.python), "-X", "utf8", "-u", str(Path(__file__).resolve()), "--bridge", str(self.script)]
-        timeout = 180 if payload.get("action") == "auth_check" else 3600
+        action = payload.get("action")
+        timeout = 240 if action == "auth_check" else (600 if action == "reauth" else 3600)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         result: dict[str, Any] | None = None
         error: dict[str, Any] | None = None
@@ -51,7 +63,14 @@ class YouTubePublisher:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+                env={
+                    **os.environ,
+                    "PYTHONIOENCODING": "utf-8",
+                    "PYTHONUTF8": "1",
+                    "REQUESTS_CA_BUNDLE": _ca_bundle(),
+                    "CURL_CA_BUNDLE": _ca_bundle(),
+                    "SSL_CERT_FILE": _ca_bundle(),
+                },
             )
             assert process.stdin is not None
             assert process.stdout is not None
@@ -123,6 +142,11 @@ class YouTubePublisher:
         result = self._run({"action": "auth_check"})
         if result.get("status") != "auth_ok":
             raise RuntimeError("YouTube authorization is not ready")
+
+    def reauth(self) -> None:
+        result = self._run({"action": "reauth"})
+        if result.get("status") != "auth_ok":
+            raise RuntimeError("YouTube reauthorization failed")
 
     def _duration(self, video_path: Path) -> float:
         ffprobe = shutil.which("ffprobe") or "ffprobe"
@@ -264,6 +288,11 @@ def _atomic_save_token(path: str, content: str) -> None:
             os.unlink(temporary)
 
 
+def _bridge_reauth(module: ModuleType) -> None:
+    credentials = module.run_local_oauth()
+    del credentials
+
+
 def _load_credentials(module: ModuleType) -> Any:
     if not os.path.isfile(module.TOKEN_FILE):
         raise _AuthRequired()
@@ -356,6 +385,9 @@ def _bridge_main(script: Path) -> int:
             if payload.get("action") == "auth_check":
                 credentials = _load_credentials(module)
                 del credentials
+                _emit(protocol, {"type": "result", "status": "auth_ok"})
+            elif payload.get("action") == "reauth":
+                _bridge_reauth(module)
                 _emit(protocol, {"type": "result", "status": "auth_ok"})
             elif payload.get("action") == "upload":
                 _bridge_upload(module, payload, protocol, sys.stdin)
