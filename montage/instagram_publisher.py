@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
@@ -337,6 +338,45 @@ class InstagramPublisher:
     def publish_container(self, kind: str, graph_ip: str, container_id: str) -> str:
         module = self.trial if kind == "trial" else self.main
         return module.publish_container(graph_ip, container_id)
+
+    def find_recent_publication(
+        self,
+        kind: str,
+        graph_ip: str,
+        caption: str,
+        published_after: datetime,
+        timeout: float = 120,
+    ) -> dict[str, Any] | None:
+        module = self.trial if kind == "trial" else self.main
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                payload = module.meta_request(
+                    graph_ip,
+                    "GET",
+                    f"{module.IG_USER_ID}/media",
+                    {
+                        "fields": "id,caption,media_type,media_product_type,permalink,timestamp",
+                        "limit": "25",
+                        "access_token": module.ACCESS_TOKEN,
+                    },
+                )
+                for media in payload.get("data") or []:
+                    if str(media.get("caption") or "").strip() != caption.strip():
+                        continue
+                    timestamp = str(media.get("timestamp") or "")
+                    try:
+                        published_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    if published_at.tzinfo is None:
+                        published_at = published_at.replace(tzinfo=timezone.utc)
+                    if published_at >= published_after:
+                        return dict(media)
+            except Exception as exc:
+                self.on_log(f"Проверка результата media_publish не удалась: {self.redact(str(exc))}")
+            time.sleep(10)
+        return None
 
     def media_info(self, kind: str, graph_ip: str, media_id: str) -> dict[str, Any]:
         module = self.trial if kind == "trial" else self.main

@@ -30,6 +30,9 @@ CATEGORIES = ("hook", "main", "final")
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".m4v", ".mkv", ".webm")
 PUBLISH_INTERVAL = timedelta(hours=5)
 AGENT_LABEL = "com.automontaje.factory-autoposter"
+PUBLISH_NOW_REQUEST = "publish-now.request"
+CONTROL_FILE = "control.json"
+CONTROL_CHANGED_REQUEST = "control-changed.request"
 
 
 def utc_now() -> datetime:
@@ -46,6 +49,30 @@ def redact(text: str) -> str:
         r"\1<REDACTED>",
         str(text),
     )
+
+
+def posting_enabled(state_dir: Path) -> bool:
+    try:
+        payload = json.loads((state_dir / CONTROL_FILE).read_text(encoding="utf-8"))
+        return bool(payload.get("posting_enabled", True))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return True
+
+
+def set_posting_enabled(state_dir: Path, enabled: bool) -> dict[str, Any]:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    destination = state_dir / CONTROL_FILE
+    temporary = destination.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps({"posting_enabled": bool(enabled)}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.replace(temporary, destination)
+    if not enabled:
+        (state_dir / PUBLISH_NOW_REQUEST).unlink(missing_ok=True)
+    (state_dir / CONTROL_CHANGED_REQUEST).write_text(iso_now(), encoding="utf-8")
+    update_waiting_progress(state_dir)
+    return {"posting_enabled": bool(enabled)}
 
 
 def connect_database(state_dir: Path) -> sqlite3.Connection:
@@ -337,6 +364,10 @@ def retry_due(checkpoint: sqlite3.Row, now: datetime | None = None) -> bool:
     if not retry_at:
         return True
     return (now or utc_now()) >= datetime.fromisoformat(retry_at)
+
+
+def has_ambiguous_publish(errors: dict[str, str]) -> bool:
+    return any("AMBIGUOUS_MEDIA_PUBLISH" in str(error) for error in errors.values())
 
 
 def clear_active_job(connection: sqlite3.Connection) -> None:
@@ -631,6 +662,35 @@ def process_lock(state_dir: Path) -> Iterator[None]:
         yield
 
 
+def request_publish_now(state_dir: Path) -> dict[str, Any]:
+    with process_lock(state_dir):
+        if not posting_enabled(state_dir):
+            raise RuntimeError("Автопостинг выключен")
+        connection = connect_database(state_dir)
+        try:
+            if active_job(connection):
+                raise RuntimeError("Публикация уже выполняется или ожидает проверки")
+            combination = next_combination(connection)
+            if combination is None:
+                raise RuntimeError("Все комбинации уже опубликованы")
+            request_path = state_dir / PUBLISH_NOW_REQUEST
+            temporary = request_path.with_suffix(".request.tmp")
+            temporary.write_text(iso_now(), encoding="utf-8")
+            os.replace(temporary, request_path)
+            combo_id = "-".join(map(str, combination))
+            write_progress(
+                state_dir,
+                percent=0,
+                title=f"Следующий Trial Reel {combo_id}",
+                detail="Запрошена немедленная публикация...",
+                status="queued",
+                next_run_at=iso_now(),
+            )
+            return {"requested": True, "combination": list(combination)}
+        finally:
+            connection.close()
+
+
 def archived_publication(job_id: str) -> dict[str, Any] | None:
     try:
         from montage.social_stats import stats_directory
@@ -729,7 +789,6 @@ def publish_combination(
         state_dir, percent=1, title=title,
         detail="Возобновление задачи..." if checkpoint_matches else "Подготовка задачи...",
     )
-    start_progress_overlay(state_dir)
     logs: list[str] = []
     target = {
         "id": "instagram_trial",
@@ -807,6 +866,14 @@ def publish_combination(
                 (json.dumps(target_errors, ensure_ascii=False), *combination),
             )
             connection.commit()
+            if has_ambiguous_publish(target_errors):
+                update_active_stage(connection, "ambiguous")
+                write_progress(
+                    state_dir, percent=100, title=title,
+                    detail="Meta могла опубликовать Reel. Автоповтор остановлен до проверки.",
+                    status="error",
+                )
+                return {"published": False, "errors": target_errors, "report": str(report)}
             retry_minutes, retry_at = schedule_retry(connection)
             write_progress(
                 state_dir, percent=100, title=title,
@@ -845,6 +912,14 @@ def publish_combination(
             (json.dumps(errors, ensure_ascii=False), *combination),
         )
         connection.commit()
+        if has_ambiguous_publish(errors):
+            update_active_stage(connection, "ambiguous")
+            write_progress(
+                state_dir, percent=100, title=title,
+                detail="Meta могла опубликовать Reel. Автоповтор остановлен до проверки.",
+                status="error",
+            )
+            return {"published": False, "errors": errors, "report": str(report)}
         retry_minutes, retry_at = schedule_retry(connection)
         write_progress(
             state_dir, percent=100, title=title,
@@ -859,6 +934,8 @@ def publish_combination(
 def run_once(rendered_dir: Path, state_dir: Path, *, dry_run: bool) -> dict[str, Any]:
     validate_sources(rendered_dir)
     with process_lock(state_dir):
+        if not dry_run and not posting_enabled(state_dir):
+            return {"paused": True, "message": "Автопостинг выключен"}
         connection = connect_database(state_dir)
         try:
             export_csv(connection, state_dir)
@@ -877,16 +954,31 @@ def run_once(rendered_dir: Path, state_dir: Path, *, dry_run: bool) -> dict[str,
                 combination = next_combination(connection)
             if combination is None:
                 return {"complete": True, "message": "Все комбинации опубликованы"}
+            publish_now = not dry_run and (state_dir / PUBLISH_NOW_REQUEST).is_file()
             interrupted = bool(checkpoint and str(checkpoint["stage"]) in {"concat", "publishing"})
             failed_retry = bool(checkpoint and str(checkpoint["stage"]) == "failed")
+            ambiguous_publish = bool(checkpoint and str(checkpoint["stage"]) == "ambiguous")
+            if not dry_run and ambiguous_publish:
+                return {
+                    "waiting": True,
+                    "message": "Автоповтор остановлен: требуется проверка неоднозначного media_publish",
+                }
             if not dry_run and failed_retry and not retry_due(checkpoint):
                 return {
                     "waiting": True,
                     "message": "Ожидание минутного повтора после ошибки",
                     "retry_at": checkpoint["retry_at"],
                 }
-            if not dry_run and not interrupted and not failed_retry and not interval_elapsed(connection):
+            if (
+                not dry_run
+                and not publish_now
+                and not interrupted
+                and not failed_retry
+                and not interval_elapsed(connection)
+            ):
                 return {"waiting": True, "message": "Пять часов после предыдущей попытки еще не прошли"}
+            if publish_now:
+                (state_dir / PUBLISH_NOW_REQUEST).unlink(missing_ok=True)
             return publish_combination(
                 connection, rendered_dir, state_dir, combination, dry_run=dry_run
             )
@@ -895,9 +987,28 @@ def run_once(rendered_dir: Path, state_dir: Path, *, dry_run: bool) -> dict[str,
 
 
 def update_waiting_progress(state_dir: Path) -> None:
+    if not posting_enabled(state_dir):
+        write_progress(
+            state_dir,
+            percent=0,
+            title="Автопостер выключен",
+            detail="Новые публикации не запускаются",
+            status="paused",
+        )
+        return
     connection = connect_database(state_dir)
     try:
         checkpoint = active_job(connection)
+        if checkpoint and str(checkpoint["stage"]) == "ambiguous":
+            combination = tuple(int(checkpoint[key]) for key in CATEGORIES)
+            write_progress(
+                state_dir,
+                percent=100,
+                title=f"Проверить Trial Reel {'-'.join(map(str, combination))}",
+                detail="Meta могла опубликовать Reel. Автоповтор остановлен.",
+                status="error",
+            )
+            return
         if checkpoint and str(checkpoint["stage"]) == "failed":
             combination = tuple(int(checkpoint[key]) for key in CATEGORIES)
             retry_at = str(checkpoint["retry_at"] or iso_now())
@@ -941,6 +1052,7 @@ def run_daemon(rendered_dir: Path, state_dir: Path) -> int:
     update_waiting_progress(state_dir)
     start_statusbar(state_dir)
     while True:
+        (state_dir / CONTROL_CHANGED_REQUEST).unlink(missing_ok=True)
         try:
             result = run_once(rendered_dir, state_dir, dry_run=False)
             print(json.dumps(result, ensure_ascii=False), flush=True)
@@ -957,7 +1069,13 @@ def run_daemon(rendered_dir: Path, state_dir: Path) -> int:
                 next_run_at=(utc_now() + timedelta(minutes=1)).replace(microsecond=0).isoformat(),
             )
             delay = 60
-        time.sleep(delay)
+        for _ in range(delay):
+            time.sleep(1)
+            if (
+                (state_dir / PUBLISH_NOW_REQUEST).is_file()
+                or (state_dir / CONTROL_CHANGED_REQUEST).is_file()
+            ):
+                break
 
 
 def install_agent(rendered_dir: Path, state_dir: Path) -> Path:
@@ -989,7 +1107,7 @@ def install_agent(rendered_dir: Path, state_dir: Path) -> Path:
     return plist_path
 
 
-def status(connection: sqlite3.Connection) -> dict[str, Any]:
+def status(connection: sqlite3.Connection, state_dir: Path) -> dict[str, Any]:
     row = connection.execute(
         "SELECT COUNT(*) AS total, SUM(published) AS published FROM combinations"
     ).fetchone()
@@ -1000,6 +1118,7 @@ def status(connection: sqlite3.Connection) -> dict[str, Any]:
         "remaining": int(row["total"] - (row["published"] or 0)),
         "next": next_combination(connection),
         "last_publish_attempt_at": setting(connection, "last_publish_attempt_at") or None,
+        "posting_enabled": posting_enabled(state_dir),
         "active_job": (
             {
                 "combination": [checkpoint["hook"], checkpoint["main"], checkpoint["final"]],
@@ -1018,7 +1137,7 @@ def set_retry_delay(state_dir: Path, minutes: int) -> dict[str, Any]:
     connection = connect_database(state_dir)
     try:
         checkpoint = active_job(connection)
-        if not checkpoint or str(checkpoint["stage"]) != "failed":
+        if not checkpoint or str(checkpoint["stage"]) not in {"failed", "ambiguous"}:
             raise RuntimeError("Нет публикации, ожидающей повтора")
         delay, retry_at = schedule_retry(connection, minutes)
         combination = tuple(int(checkpoint[key]) for key in CATEGORIES)
@@ -1051,6 +1170,9 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser("progress-window", help=argparse.SUPPRESS)
     retry_parser = subparsers.add_parser("set-retry", help=argparse.SUPPRESS)
     retry_parser.add_argument("--minutes", type=int, required=True)
+    subparsers.add_parser("publish-now", help=argparse.SUPPRESS)
+    posting_parser = subparsers.add_parser("set-posting", help=argparse.SUPPRESS)
+    posting_parser.add_argument("--enabled", choices=("0", "1"), required=True)
     subparsers.add_parser("install-agent", help="Создать macOS LaunchAgent (без запуска)")
     return parser.parse_args()
 
@@ -1063,6 +1185,14 @@ def main() -> int:
         return show_progress_window(state_dir)
     if args.command == "set-retry":
         result = set_retry_delay(state_dir, args.minutes)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "publish-now":
+        result = request_publish_now(state_dir)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "set-posting":
+        result = set_posting_enabled(state_dir, args.enabled == "1")
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     if args.command == "daemon":
@@ -1079,10 +1209,10 @@ def main() -> int:
         csv_path = export_csv(connection, state_dir)
         if args.command == "init":
             validate_sources(rendered_dir)
-            print(json.dumps({**status(connection), "csv": str(csv_path)}, ensure_ascii=False, indent=2))
+            print(json.dumps({**status(connection, state_dir), "csv": str(csv_path)}, ensure_ascii=False, indent=2))
             return 0
         if args.command == "status":
-            print(json.dumps(status(connection), ensure_ascii=False, indent=2))
+            print(json.dumps(status(connection, state_dir), ensure_ascii=False, indent=2))
             return 0
     finally:
         connection.close()

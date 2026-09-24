@@ -9,9 +9,12 @@
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, strong) NSMenuItem *nextItem;
 @property(nonatomic, strong) NSMenuItem *countdownItem;
+@property(nonatomic, strong) NSMenuItem *publishNowItem;
+@property(nonatomic, strong) NSMenuItem *postingToggleItem;
 @property(nonatomic, strong) NSMenuItem *retryItem;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, copy) NSString *currentStatus;
+@property(nonatomic) BOOL postingEnabled;
 @end
 
 @implementation StatusBarController
@@ -25,6 +28,7 @@
         _pythonPath = [pythonPath copy];
         _scriptPath = [scriptPath copy];
         _currentStatus = @"waiting";
+        _postingEnabled = YES;
     }
     return self;
 }
@@ -46,6 +50,18 @@
     [menu addItem:self.nextItem];
     [menu addItem:self.countdownItem];
     [menu addItem:[NSMenuItem separatorItem]];
+
+    self.publishNowItem = [[NSMenuItem alloc] initWithTitle:@"Опубликовать сейчас"
+                                                     action:@selector(publishNow:)
+                                              keyEquivalent:@""];
+    self.publishNowItem.target = self;
+    [menu addItem:self.publishNowItem];
+
+    self.postingToggleItem = [[NSMenuItem alloc] initWithTitle:@"Выключить автопостинг"
+                                                        action:@selector(togglePosting:)
+                                                 keyEquivalent:@""];
+    self.postingToggleItem.target = self;
+    [menu addItem:self.postingToggleItem];
 
     self.retryItem = [[NSMenuItem alloc] initWithTitle:@"Повторить через..."
                                                 action:@selector(chooseRetryDelay:)
@@ -75,6 +91,15 @@
     if (!data) return nil;
     id payload = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     return [payload isKindOfClass:[NSDictionary class]] ? payload : nil;
+}
+
+- (BOOL)loadPostingEnabled {
+    NSURL *path = [self.stateDirectory URLByAppendingPathComponent:@"control.json"];
+    NSData *data = [NSData dataWithContentsOfURL:path];
+    if (!data) return YES;
+    NSDictionary *payload = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSNumber *value = [payload isKindOfClass:[NSDictionary class]] ? payload[@"posting_enabled"] : nil;
+    return value ? value.boolValue : YES;
 }
 
 - (NSInteger)remainingSeconds:(NSString *)value {
@@ -109,6 +134,7 @@
     NSString *detail = [payload[@"detail"] isKindOfClass:[NSString class]]
         ? payload[@"detail"] : @"";
     NSInteger seconds = [self remainingSeconds:payload[@"next_run_at"]];
+    self.postingEnabled = [self loadPostingEnabled];
     self.nextItem.title = title;
 
     if ([self.currentStatus isEqualToString:@"running"]) {
@@ -125,7 +151,40 @@
         self.countdownItem.title = detail.length ? detail : @"Ожидание";
         self.statusItem.button.title = @"";
     }
+    self.publishNowItem.enabled = self.postingEnabled && [self.currentStatus isEqualToString:@"waiting"];
+    self.postingToggleItem.title = self.postingEnabled
+        ? @"Выключить автопостинг" : @"Включить автопостинг";
     self.retryItem.enabled = [self.currentStatus isEqualToString:@"error"];
+}
+
+- (void)publishNow:(id)sender {
+    if (![self.currentStatus isEqualToString:@"waiting"]) return;
+    self.publishNowItem.enabled = NO;
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:self.pythonPath];
+    task.arguments = @[
+        self.scriptPath,
+        @"--state-dir", self.stateDirectory.path,
+        @"publish-now",
+    ];
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    [task launchAndReturnError:nil];
+}
+
+- (void)togglePosting:(id)sender {
+    self.postingToggleItem.enabled = NO;
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:self.pythonPath];
+    task.arguments = @[
+        self.scriptPath,
+        @"--state-dir", self.stateDirectory.path,
+        @"set-posting", @"--enabled", self.postingEnabled ? @"0" : @"1",
+    ];
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    [task launchAndReturnError:nil];
+    self.postingToggleItem.enabled = YES;
 }
 
 - (void)chooseRetryDelay:(id)sender {

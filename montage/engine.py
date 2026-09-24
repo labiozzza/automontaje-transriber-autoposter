@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
@@ -737,8 +738,29 @@ def _publish_targets(
             caption = str(target.get("caption") or target.get("text") or "")
             container = instagram.create_container(variant, graph_ip, raw_url, caption, cover_url)
             instagram.wait_container(variant, graph_ip, container, lambda p, d: sub_progress(45 + p * 0.5, d))
-            media_id = instagram.publish_container(variant, graph_ip, container)
-            info = instagram.media_info(variant, graph_ip, media_id)
+            publish_started_at = datetime.now(timezone.utc)
+            try:
+                media_id = instagram.publish_container(variant, graph_ip, container)
+                info = instagram.media_info(variant, graph_ip, media_id)
+            except Exception as publish_exc:
+                log_cb(
+                    "media_publish вернул ошибку; проверяю, не была ли публикация "
+                    "фактически создана Meta"
+                )
+                info = instagram.find_recent_publication(
+                    variant,
+                    graph_ip,
+                    caption,
+                    publish_started_at - timedelta(minutes=2),
+                )
+                if not info or not str(info.get("id") or "").strip():
+                    raise RuntimeError(
+                        "AMBIGUOUS_MEDIA_PUBLISH: Meta могла опубликовать Reel, "
+                        "но media_id не подтверждён; автоматический повтор запрещён. "
+                        f"Исходная ошибка: {publish_exc}"
+                    ) from publish_exc
+                media_id = str(info["id"])
+                log_cb(f"media_publish восстановлен по списку публикаций: {media_id}")
             permalink = str(info.get("permalink") or "")
             published_result = {"media_id": media_id, "permalink": permalink, "kind": label}
             try:
