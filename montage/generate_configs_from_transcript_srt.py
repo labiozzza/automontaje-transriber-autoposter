@@ -330,6 +330,8 @@ def list_from_lm(data: dict[str, Any] | None, key: str) -> list[str]:
 
 
 def build_rules(words: list[Cue], sentences: list[list[Cue]], lm: dict[str, Any] | None) -> dict[str, list[str]]:
+    if not USE_BIGPICKLE:
+        return {"green": [], "yellow": [], "red": []}
     green = set(map(normalize_phrase, list_from_lm(lm, "green")))
     yellow = set(map(normalize_phrase, list_from_lm(lm, "yellow")))
     red = set(map(normalize_phrase, list_from_lm(lm, "red")))

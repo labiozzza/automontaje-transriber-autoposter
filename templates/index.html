@@ -2,8 +2,11 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0a0a0f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
@@ -26,6 +29,7 @@
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { -webkit-text-size-adjust: 100%; }
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
@@ -436,6 +440,31 @@ select option { background: var(--surface2); }
 .result-display::-webkit-scrollbar-track { background: transparent; }
 .result-display::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
+.transcript-segment-text {
+  display: inline-block;
+  min-width: 1ch;
+  border-radius: 4px;
+  padding: 0 3px;
+  margin: 0 -3px;
+  cursor: text;
+}
+
+.transcript-segment-text:hover { background: rgba(108, 92, 231, 0.08); }
+.transcript-segment-text:focus {
+  background: rgba(108, 92, 231, 0.14);
+  outline: 1px solid var(--accent);
+}
+
+.transcript-save-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.transcript-save-status { color: var(--text2); font-size: 12px; }
+
 .speaker-tag {
   display: inline-block;
   padding: 2px 8px;
@@ -519,6 +548,7 @@ select option { background: var(--surface2); }
   left: 0;
   right: 0;
   bottom: 0;
+  z-index: 7;
   pointer-events: none;
 }
 .sub-drag-layer .sub-card {
@@ -617,24 +647,80 @@ select option { background: var(--surface2); }
 .keybar-marker.word { background: var(--accent2); border-color: #2a2050; }
 .keybar-marker.active { background: var(--accent); border-color: #1d5b4e; }
 .keybar-marker.anim { background: #FFD54F; border-color: #755c00; }
+.overlay-preview-layer { position:absolute; inset:0; z-index:6; pointer-events:none; overflow:hidden; }
 .timeline-animation-preview {
-  display: none;
-  position: absolute;
-  left: 10%;
-  right: 10%;
-  bottom: 8px;
-  height: 48px;
-  pointer-events: none;
-  z-index: 5;
+  display:none; position:absolute; left:10%; right:10%; bottom:8px; height:48px;
+  pointer-events:none; z-index:5;
 }
-.timeline-animation-preview.active { display: block; }
-.timeline-animation-item {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  width: 36px;
-  height: auto;
-  transform: translateX(-50%);
+.timeline-animation-preview.active { display:block; }
+.timeline-animation-item { position:absolute; left:0; bottom:0; width:36px; height:auto; transform:translateX(-50%); }
+.overlay-preview-item {
+  position:absolute; transform:translate(-50%,-50%); pointer-events:auto;
+  touch-action:none; user-select:none; cursor:grab; filter:drop-shadow(0 3px 8px rgba(0,0,0,.45));
+}
+.overlay-preview-item img { display:block; width:100%; height:100%; pointer-events:none; user-select:none; -webkit-user-drag:none; }
+.overlay-preview-item .drawing-host, .overlay-preview-item svg { display:block; width:100%; height:100%; pointer-events:none; overflow:visible; }
+.overlay-preview-item:active { cursor:grabbing; }
+.overlay-preview-item.selected { outline:2px solid var(--accent2); outline-offset:4px; border-radius:4px; }
+.overlay-resize-handle { display:none; position:absolute; z-index:3; width:16px; height:16px; }
+.overlay-preview-item.selected .overlay-resize-handle { display:block; }
+.overlay-resize-handle.nw { left:-8px; top:-8px; border-left:3px solid #fff; border-top:3px solid #fff; cursor:nwse-resize; }
+.overlay-resize-handle.ne { right:-8px; top:-8px; border-right:3px solid #fff; border-top:3px solid #fff; cursor:nesw-resize; }
+.overlay-resize-handle.sw { left:-8px; bottom:-8px; border-left:3px solid #fff; border-bottom:3px solid #fff; cursor:nesw-resize; }
+.overlay-resize-handle.se { right:-8px; bottom:-8px; border-right:3px solid #fff; border-bottom:3px solid #fff; cursor:nwse-resize; }
+@media (pointer:coarse) {
+  .overlay-resize-handle, .overlay-preview-item.selected .overlay-resize-handle { display:none; }
+}
+.overlay-inspector { display:none; margin-top:14px; padding-top:14px; border-top:1px solid var(--border); }
+.overlay-inspector.active { display:block; }
+.overlay-inspector-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+.overlay-inspector-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+.overlay-position { margin-top:10px; color:var(--text2); font-size:12px; font-family:ui-monospace,monospace; }
+.overlay-trash {
+  position:absolute; left:50%; bottom:16px; z-index:20; display:flex; align-items:center; gap:8px;
+  padding:10px 16px; color:#fff; background:rgba(15,17,24,.9); border:1px solid rgba(255,255,255,.25);
+  border-radius:999px; opacity:0; transform:translate(-50%,18px) scale(.92); pointer-events:none;
+  transition:opacity .16s ease,transform .16s ease,background .16s ease,border-color .16s ease;
+}
+.overlay-trash.active { opacity:1; transform:translate(-50%,0) scale(1); }
+.overlay-trash.armed { background:rgba(225,112,85,.95); border-color:#ffb8b0; transform:translate(-50%,0) scale(1.06); }
+.overlay-timeline-wrap { position:relative; }
+.drawing-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:10px 0; }
+.drawing-proposals { display:none; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; margin:10px 0 14px; }
+.drawing-proposals.active { display:grid; }
+.drawing-proposal { padding:10px; border:1px solid var(--border); border-radius:10px; background:var(--surface2); }
+.drawing-proposal-preview { height:150px; margin-bottom:8px; border-radius:8px; background:linear-gradient(145deg,#151826,#272d43); }
+.drawing-proposal-preview svg { width:100%; height:100%; }
+.drawing-proposal-fields { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin:8px 0; }
+.drawing-proposal-fields input { min-width:0; padding:7px; }
+.overlay-timeline {
+  position:relative; min-height:44px; margin:8px 0 4px; padding:4px 0;
+  overflow:hidden; border:1px solid var(--border); border-radius:8px;
+  background:repeating-linear-gradient(90deg,var(--surface2) 0,var(--surface2) calc(10% - 1px),rgba(255,255,255,.055) 10%);
+  touch-action:none; cursor:pointer;
+}
+.overlay-add-button {
+  position:absolute; right:6px; top:6px; z-index:20; width:30px; height:30px; padding:0;
+  border:1px solid rgba(255,255,255,.35); border-radius:50%; color:#fff;
+  background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 3px 10px rgba(0,0,0,.35);
+  font-size:22px; line-height:28px; cursor:pointer;
+}
+.overlay-timeline-empty { padding:9px 12px; color:var(--text2); font-size:12px; text-align:center; }
+.overlay-timeline-caption { height:34px; padding:8px 44px 0 12px; color:var(--text2); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; }
+.overlay-clip {
+  position:absolute; height:30px; min-width:12px; border:1px solid rgba(255,255,255,.22); border-radius:7px;
+  background:linear-gradient(135deg,rgba(108,92,231,.9),rgba(167,139,250,.78));
+  box-shadow:0 2px 7px rgba(0,0,0,.28); color:white; cursor:grab; overflow:hidden;
+}
+.overlay-clip.selected { box-shadow:0 0 0 2px rgba(255,255,255,.85),0 3px 10px rgba(0,0,0,.35); }
+.overlay-clip-label { display:block; padding:6px 13px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:11px; font-weight:700; pointer-events:none; }
+.overlay-clip-handle { position:absolute; top:0; bottom:0; width:10px; background:rgba(255,255,255,.2); cursor:ew-resize; }
+.overlay-clip-handle.left { left:0; border-right:1px solid rgba(255,255,255,.32); }
+.overlay-clip-handle.right { right:0; border-left:1px solid rgba(255,255,255,.32); }
+.overlay-timeline-playhead { position:absolute; top:0; bottom:0; z-index:10; width:2px; background:#fff; box-shadow:0 0 5px rgba(255,255,255,.7); pointer-events:none; }
+@media (max-width:620px) {
+  .overlay-inspector-grid { grid-template-columns:1fr 1fr; }
+  .overlay-inspector-grid .setting-group:last-child { grid-column:1 / -1; }
 }
 .animation-frame-list { display:flex; gap:10px; flex-wrap:wrap; min-height:96px; padding:12px; border:1px dashed var(--border); border-radius:10px; }
 .animation-frame { width:82px; padding:6px; border:1px solid var(--border); border-radius:8px; background:var(--surface2); cursor:grab; text-align:center; }
@@ -877,6 +963,10 @@ select option { background: var(--surface2); }
       </div>
 
       <div class="result-display" id="resultDisplay"></div>
+      <div class="transcript-save-bar">
+        <span class="transcript-save-status" id="transcriptSaveStatus">Нажмите на текст сегмента, чтобы изменить его</span>
+        <button class="btn btn-primary" id="saveTranscriptBtn" type="button" onclick="saveTranscript()" disabled>Сохранить</button>
+      </div>
 
       <div class="export-bar">
         <button class="export-btn" onclick="download('srt')">⬇ SRT</button>
@@ -914,11 +1004,13 @@ select option { background: var(--surface2); }
     <div class="results-container" id="projectPreviewCard">
       <div class="card">
         <div class="card-title">Превью проекта
-          <span style="margin-left:6px;font-size:12px;color:var(--text2)">тяните субтитры пальцем — двигайте и масштабируйте</span>
+          <span style="margin-left:6px;font-size:12px;color:var(--text2)">перетаскивайте субтитры и выбранные наложения</span>
         </div>
         <div class="video-stage">
           <video id="projectPreviewVideo" playsinline controls preload="metadata"></video>
-          <div class="timeline-animation-preview" id="timelineAnimationPreview"><img class="timeline-animation-item" alt="Кадр анимации"></div>
+          <div class="timeline-animation-preview" id="timelineAnimationPreview"><img class="timeline-animation-item" alt="Кадр анимации таймлайна"></div>
+          <div class="overlay-preview-layer" id="overlayPreviewLayer"></div>
+          <div class="overlay-trash" id="overlayTrash" aria-hidden="true"><span>🗑</span><strong>Удалить наложение</strong></div>
           <div class="sub-drag-layer">
             <div class="sub-drag-tip">Левая грань X <span id="projectPreviewSubX">0.12</span> • Y <span id="projectPreviewSubY">0.78</span> • Размер <span id="projectPreviewSubScale">1.00</span></div>
             <div class="sub-card" id="projectPreviewSubCard"><span class="sub-card-text" id="projectPreviewSubText"></span></div>
@@ -927,6 +1019,25 @@ select option { background: var(--surface2); }
         <div class="timebar-scale">
           <span id="projectPreviewCur">00:00.000</span>
           <span id="projectPreviewDur">00:00.000</span>
+        </div>
+        <div class="overlay-timeline-wrap">
+          <div class="overlay-timeline" id="overlayTimeline"><div class="overlay-timeline-empty">Добавьте картинку кнопкой +</div></div>
+          <input id="montageOverlayUpload" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onchange="handleOverlayUpload(this.files)">
+        </div>
+        <div class="drawing-actions">
+          <button class="btn" type="button" id="generateDrawingsBtn" onclick="generateMontageDrawings()">GPT: предложить рисунки</button>
+          <span class="toggle-desc" id="drawingGenerationStatus">Рисунки появятся здесь перед добавлением на таймлайн</span>
+        </div>
+        <div class="drawing-proposals" id="drawingProposals"></div>
+        <div class="overlay-inspector" id="overlayInspector">
+          <div class="overlay-inspector-head"><strong id="overlayInspectorName">Наложение</strong></div>
+          <div class="overlay-inspector-grid">
+            <div class="setting-group"><label>Начало, сек</label><input type="number" id="overlayStart" min="0" step="0.05" oninput="updateSelectedOverlayFromInputs()"></div>
+            <div class="setting-group"><label>Конец, сек</label><input type="number" id="overlayEnd" min="0.05" step="0.05" oninput="updateSelectedOverlayFromInputs()"></div>
+            <div class="setting-group"><label>Размер, px</label><input type="number" id="overlaySize" min="20" max="1200" step="10" oninput="updateSelectedOverlayFromInputs()"></div>
+            <div class="setting-group" id="overlayDrawSpeedGroup" style="display:none"><label>Скорость рисования</label><input type="number" id="overlayDrawSpeed" min="10" max="3000" step="10" oninput="updateSelectedOverlayFromInputs()"></div>
+          </div>
+          <div class="overlay-position" id="overlayPosition">X 0.50 · Y 0.50 · слой 1</div>
         </div>
         <div class="keybar" id="projectPreviewKeybar">
           <div id="projectPreviewMarkers"></div>
@@ -1025,7 +1136,7 @@ select option { background: var(--surface2); }
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Добавить отражение</div>
-            <div class="toggle-desc">Отразить исходное видео по горизонтали; субтитры и анимация останутся без отражения</div>
+            <div class="toggle-desc">Отразить только исходное видео; субтитры и все наложения останутся без отражения</div>
           </div>
           <label class="toggle">
             <input type="checkbox" id="montageMirrorHorizontal" onchange="updateMirrorPreview()">
@@ -1053,12 +1164,22 @@ select option { background: var(--surface2); }
             <div class="toggle-slider"></div>
           </label>
         </div>
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Заглушить нежелательные слова</div>
+            <div class="toggle-desc">Середина произнесённого слова заменяется тишиной; текст субтитров не размывается</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="montageBlurBannedWords">
+            <div class="toggle-slider"></div>
+          </label>
+        </div>
       </div>
     </div>
 
     <!-- Advanced -->
     <div class="card">
-      <div class="card-title">Дополнительно: таймлайн и анимация</div>
+      <div class="card-title">Дополнительно: таймлайн и наложения</div>
       <div class="montage-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
         <div class="setting-group">
           <label>Позиция субтитров</label>
@@ -1084,18 +1205,16 @@ select option { background: var(--surface2); }
           <input type="number" id="montageSubtitleFontSize" value="64" min="24" max="128" step="1" oninput="updateSubtitleFontSize(false)" onchange="updateSubtitleFontSize(true)">
         </div>
         <div class="setting-group">
-          <label>Анимация прогресса (таймлайн)</label>
-          <select id="montageAnimationId" onchange="updateAnimationPreview()">
-            <option value="">Без анимации</option>
-          </select>
+          <label>Анимация таймлайна</label>
+          <select id="montageAnimationId" onchange="updateAnimationPreview()"><option value="">Без анимации</option></select>
         </div>
         <div class="setting-group">
           <label>Появляется через, сек</label>
-          <input type="number" id="montageAnimationStart" value="0" min="0" step="0.1" oninput="updateAnimationPreview()">
+          <input type="number" id="montageAnimationStart" value="0" min="0" step="0.1" oninput="syncAnimationPreview()">
         </div>
         <div class="setting-group">
           <label>Смещение по X, px</label>
-          <input type="number" id="montageAnimationOffset" value="0" min="-200" max="200">
+          <input type="number" id="montageAnimationOffset" value="0" min="-200" max="200" step="1" oninput="syncAnimationPreview()">
         </div>
       </div>
       <div style="margin-top:12px">
@@ -1238,6 +1357,7 @@ let jobId = null;
 let ws = null;
 let segments = [];
 let currentTab = 'dialogue';
+let transcriptDirty = false;
 
 const SPEAKER_COLORS = ['speaker-0','speaker-1','speaker-2','speaker-3','speaker-4','speaker-5'];
 
@@ -1387,6 +1507,7 @@ async function loadResult() {
     const data = await res.json();
     segments = data.segments;
     transcriptJobId = jobId;
+    setTranscriptDirty(false);
     document.getElementById('resultsCard').classList.add('active');
     document.getElementById('montageTranscriptInfo').textContent = `Использовать транскрибацию: ${data.segments.length} сегментов`;
     refreshProjects();
@@ -1411,11 +1532,15 @@ function refreshDisplay() {
   }
 }
 
+function editableTranscriptText(seg, index) {
+  return `<span class="transcript-segment-text" contenteditable="true" spellcheck="true" data-segment-index="${index}" oninput="editTranscriptSegment(this)">${escapeHtml(seg.text)}</span>`;
+}
+
 function renderDialogue(segs, showTC, showSP) {
   let html = '';
   let lastSpeaker = null;
 
-  for (const seg of segs) {
+  for (const [index, seg] of segs.entries()) {
     const sp = seg.speaker;
     if (showSP && sp && sp !== lastSpeaker) {
       lastSpeaker = sp;
@@ -1425,7 +1550,7 @@ function renderDialogue(segs, showTC, showSP) {
 
     let line = '';
     if (showTC) line += `<span class="timecode">[${fmtTime(seg.start)}]</span>`;
-    line += escapeHtml(seg.text);
+    line += editableTranscriptText(seg, index);
 
     html += `<div style="margin-left:${showTC ? '72px' : '0'};margin-bottom:4px">${line}</div>`;
   }
@@ -1435,10 +1560,10 @@ function renderDialogue(segs, showTC, showSP) {
 
 function renderPlainText(segs, showSP) {
   let html = '';
-  for (const seg of segs) {
+  for (const [index, seg] of segs.entries()) {
     let line = '';
     if (showSP && seg.speaker) line += `${speakerTag(seg.speaker)} `;
-    line += escapeHtml(seg.text);
+    line += editableTranscriptText(seg, index);
     html += `<div style="margin-bottom:4px">${line}</div>`;
   }
   return html || '<span style="color:var(--text2)">Нет данных</span>';
@@ -1477,6 +1602,51 @@ function switchTab(tab, btn) {
   document.querySelectorAll('.result-tab').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   refreshDisplay();
+}
+
+function setTranscriptDirty(dirty, message = '') {
+  transcriptDirty = dirty;
+  const button = document.getElementById('saveTranscriptBtn');
+  const status = document.getElementById('transcriptSaveStatus');
+  if (button) button.disabled = !dirty;
+  if (status) status.textContent = message || (dirty
+    ? 'Есть несохранённые изменения'
+    : 'Нажмите на текст сегмента, чтобы изменить его');
+}
+
+function editTranscriptSegment(element) {
+  const index = Number(element.dataset.segmentIndex);
+  if (!Number.isInteger(index) || !segments[index]) return;
+  segments[index].text = element.innerText.replace(/\u00a0/g, ' ');
+  setTranscriptDirty(true);
+}
+
+async function saveTranscript() {
+  if (!jobId || !transcriptDirty) return;
+  const button = document.getElementById('saveTranscriptBtn');
+  const texts = segments.map(segment => segment.text);
+  button.disabled = true;
+  button.textContent = 'Сохранение...';
+  setTranscriptDirty(true, 'Сохраняем изменения...');
+  try {
+    const res = await fetch(`/api/result/${jobId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({texts}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    const unchangedSinceRequest = segments.every((segment, index) => segment.text === texts[index]);
+    setTranscriptDirty(!unchangedSinceRequest, unchangedSinceRequest
+      ? 'Сохранено. Эта версия будет использована при экспорте и монтаже'
+      : 'Есть новые несохранённые изменения');
+    refreshProjects();
+  } catch (e) {
+    setTranscriptDirty(true, `Не удалось сохранить: ${e.message}`);
+  } finally {
+    button.textContent = 'Сохранить';
+    button.disabled = !transcriptDirty;
+  }
 }
 
 function download(format) {
@@ -1603,6 +1773,7 @@ function setMontageVideo(file) {
   video.src = window.__montageObjectUrl;
   card.classList.add('active');
   updateMirrorPreview();
+  renderOverlayEditor();
   updateAnimationPreview();
   updateSubtitlePreviewStyle();
 }
@@ -1960,38 +2131,33 @@ async function loadAnimationOptions() {
   try {
     const res = await fetch('/api/montage/animations');
     const data = await res.json();
-    const sel = document.getElementById('montageAnimationId');
     if (!data.animations || !data.animations.length) return;
-    const selected = sel.value;
-    sel.innerHTML = '<option value="">Без анимации</option>' +
-      data.animations.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
-    if (selected && [...sel.options].some(option => option.value === selected)) {
-      sel.value = selected;
-    } else {
-      const cat = data.animations.find(a => a.id.includes('Running_Cat')) || data.animations[0];
-      if (cat) sel.value = cat.id;
+    const options = data.animations.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+    const cat = data.animations.find(a => a.id.includes('Running_Cat')) || data.animations[0];
+    const select = document.getElementById('montageAnimationId');
+    const selected = select.value;
+    select.innerHTML = `<option value="">Без анимации</option>${options}`;
+    if (selected && [...select.options].some(option => option.value === selected)) {
+      select.value = selected;
+    } else if (cat) {
+      select.value = cat.id;
     }
     updateAnimationPreview();
   } catch(e) {}
 }
 
-let animationPreviewData = {id: '', fps: 10, frames: []};
+let timelineAnimationPreviewData = {id:'', fps:10, frames:[]};
 async function updateAnimationPreview() {
-  const preview = document.getElementById('timelineAnimationPreview');
   const select = document.getElementById('montageAnimationId');
-  if (!preview || !select) return;
+  const preview = document.getElementById('timelineAnimationPreview');
+  if (!select || !preview) return;
   preview.classList.toggle('active', Boolean(select.value));
-  if (!select.value) return;
-  if (animationPreviewData.id !== select.value) {
-    try {
-      const manifest = await (await fetch(`/animation-assets/${encodeURIComponent(select.value)}/manifest.json`, {cache:'no-store'})).json();
-      animationPreviewData = {
-        id: select.value,
-        fps: Number(manifest.fps) || 10,
-        frames: (manifest.frames || []).map(frame => `/animation-assets/${encodeURIComponent(select.value)}/${encodeURIComponent(typeof frame === 'string' ? frame : frame.file)}`),
-      };
-    } catch (_) { animationPreviewData = {id: select.value, fps: 10, frames: []}; }
+  if (!select.value) {
+    syncAnimationPreview();
+    return;
   }
+  const manifest = await loadOverlayManifest(select.value);
+  timelineAnimationPreviewData = {id:select.value, fps:manifest.fps, frames:manifest.frames};
   syncAnimationPreview();
 }
 
@@ -1999,18 +2165,25 @@ function syncAnimationPreview() {
   const preview = document.getElementById('timelineAnimationPreview');
   const video = document.getElementById('projectPreviewVideo');
   const item = preview?.querySelector('.timeline-animation-item');
-  if (!preview?.classList.contains('active') || !item) return;
-  const start = Math.max(0, Number(document.getElementById('montageAnimationStart').value) || 0);
-  const duration = Number(video.duration) || 6;
-  const time = Number(video.currentTime) || 0;
-  const rel = Math.max(0, Math.min(1, (time - start) / Math.max(.001, duration - start)));
-  item.style.left = `${rel * 100}%`;
-  item.style.display = time >= start && animationPreviewData.frames.length ? 'block' : 'none';
-  if (animationPreviewData.frames.length) {
-    item.src = animationPreviewData.frames[Math.floor(time * animationPreviewData.fps) % animationPreviewData.frames.length];
-    const scale = video.videoWidth ? video.clientWidth / video.videoWidth : 1;
-    item.style.width = `${Math.max(20, 72 * scale)}px`;
+  const select = document.getElementById('montageAnimationId');
+  if (!preview || !item || !select) return;
+  const active = Boolean(select.value && timelineAnimationPreviewData.frames.length);
+  preview.classList.toggle('active', active);
+  if (!active) {
+    item.style.display = 'none';
+    return;
   }
+  const start = Math.max(0, Number(document.getElementById('montageAnimationStart').value) || 0);
+  const duration = montageOverlayDuration();
+  const time = Number(video.currentTime) || 0;
+  const rel = clamp((time - start) / Math.max(.001, duration - start), 0, 1);
+  const scale = video.videoWidth ? video.clientWidth / video.videoWidth : video.clientWidth / 1080;
+  const offset = Number(document.getElementById('montageAnimationOffset').value) || 0;
+  item.style.left = `${rel * 100}%`;
+  item.style.marginLeft = `${offset * scale}px`;
+  item.style.display = time >= start ? 'block' : 'none';
+  item.src = timelineAnimationPreviewData.frames[Math.floor(time * timelineAnimationPreviewData.fps) % timelineAnimationPreviewData.frames.length];
+  item.style.width = `${Math.max(20, 72 * scale)}px`;
   const markers = document.getElementById('projectPreviewMarkers');
   if (markers && duration) {
     let marker = markers.querySelector('.keybar-marker.anim');
@@ -2019,9 +2192,484 @@ function syncAnimationPreview() {
       marker.className = 'keybar-marker anim';
       markers.appendChild(marker);
     }
-    marker.style.left = `${Math.min(100, start / duration * 100)}%`;
-    marker.title = `Анимация: ${fmtTimecode(start)}`;
+    marker.style.left = `${clamp(start / duration * 100, 0, 100)}%`;
+    marker.title = `Анимация таймлайна: ${fmtTimecode(start)}`;
   }
+}
+
+let montageOverlays = [];
+let selectedOverlayUid = '';
+let overlaySequence = 0;
+let pendingDrawings = [];
+const overlayManifestCache = new Map();
+
+function montageOverlayDuration() {
+  const video = document.getElementById('projectPreviewVideo');
+  const videoDuration = Number(video?.duration);
+  if (Number.isFinite(videoDuration) && videoDuration > 0) return videoDuration;
+  const segmentEnd = Math.max(0, ...(window.__lastSegs || []).map(item => Number(item.end) || 0));
+  return segmentEnd || 6;
+}
+
+async function loadOverlayManifest(animationId) {
+  if (overlayManifestCache.has(animationId)) return overlayManifestCache.get(animationId);
+  let result = {fps: 10, frames: []};
+  try {
+    const manifest = await (await fetch(`/animation-assets/${encodeURIComponent(animationId)}/manifest.json`, {cache:'no-store'})).json();
+    result = {
+      fps: Number(manifest.fps) || 10,
+      frames: (manifest.frames || []).map(frame => `/animation-assets/${encodeURIComponent(animationId)}/${encodeURIComponent(typeof frame === 'string' ? frame : frame.file)}`),
+    };
+  } catch (_) {}
+  overlayManifestCache.set(animationId, result);
+  return result;
+}
+
+function selectedMontageOverlay() {
+  return montageOverlays.find(item => item.uid === selectedOverlayUid) || null;
+}
+
+function drawingPathLength(points) {
+  let length = 0;
+  for (let index = 1; index < (points || []).length; index++) {
+    length += Math.hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1]);
+  }
+  return length;
+}
+
+function drawingSvgMarkup(drawing, visibleLength = Infinity) {
+  const width = Number(drawing?.width) || 1000;
+  const height = Number(drawing?.height) || 1000;
+  let remaining = Math.max(0, visibleLength);
+  const paths = (drawing?.paths || []).map(path => {
+    const length = drawingPathLength(path.points);
+    const visible = !Number.isFinite(remaining) ? 1 : clamp(remaining / Math.max(.001, length), 0, 1);
+    remaining -= length;
+    const points = (path.points || []).map(point => `${Number(point[0]).toFixed(2)},${Number(point[1]).toFixed(2)}`).join(' ');
+    const opacity = clamp(Number(path.opacity) || 1, .1, 1);
+    const closedPoints = path.closed && visible >= 1 && path.points?.length ? `${points} ${path.points[0][0]},${path.points[0][1]}` : points;
+    return `<polyline points="${closedPoints}" fill="none" stroke="${esc(path.stroke || '#fff')}" stroke-width="${clamp(Number(path.stroke_width) || 8, 1, 40)}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}" pathLength="1" stroke-dasharray="1" stroke-dashoffset="${(1 - visible).toFixed(5)}"/>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${paths}</svg>`;
+}
+
+function renderDrawingProposals() {
+  const root = document.getElementById('drawingProposals');
+  root.classList.toggle('active', pendingDrawings.length > 0);
+  root.innerHTML = pendingDrawings.map((drawing, index) => `<div class="drawing-proposal">
+    <div class="drawing-proposal-preview">${drawingSvgMarkup(drawing.drawing)}</div>
+    <strong>${esc(drawing.name)}</strong>
+    <div class="toggle-desc">${esc(drawing.trigger_text || '')}</div>
+    <div class="drawing-proposal-fields">
+      <input type="number" step="0.05" value="${drawing.start}" title="Начало" onchange="updatePendingDrawing(${index},'start',this.value)">
+      <input type="number" step="0.05" value="${drawing.end}" title="Конец" onchange="updatePendingDrawing(${index},'end',this.value)">
+      <input type="number" step="10" value="${drawing.draw_speed}" title="Скорость" onchange="updatePendingDrawing(${index},'draw_speed',this.value)">
+    </div>
+    <div style="display:flex;gap:6px">
+      <button class="btn btn-primary" type="button" onclick="approvePendingDrawing(${index})">Добавить</button>
+      <button class="btn" type="button" onclick="discardPendingDrawing(${index})">Отклонить</button>
+    </div>
+  </div>`).join('');
+}
+
+function updatePendingDrawing(index, key, value) {
+  const drawing = pendingDrawings[index];
+  const number = Number(value);
+  if (!drawing || !Number.isFinite(number)) return;
+  if (key === 'start') drawing.start = Math.max(0, number);
+  if (key === 'end') drawing.end = Math.max(drawing.start + .05, number);
+  if (key === 'draw_speed') drawing.draw_speed = clamp(number, 10, 3000);
+}
+
+function discardPendingDrawing(index) {
+  pendingDrawings.splice(index, 1);
+  renderDrawingProposals();
+}
+
+function approvePendingDrawing(index) {
+  if (montageOverlays.length >= 20) return montageError('Можно добавить не более 20 наложений');
+  const proposal = pendingDrawings[index];
+  if (!proposal) return;
+  const duration = montageOverlayDuration();
+  const start = clamp(Number(proposal.start) || 0, 0, Math.max(0, duration - .05));
+  const end = clamp(Number(proposal.end) || start + 4, start + .05, duration);
+  const uid = `drawing-${Date.now().toString(36)}-${++overlaySequence}`;
+  montageOverlays.push({...proposal, uid, kind:'drawing', start, end, z_index:montageOverlays.length});
+  selectedOverlayUid = uid;
+  pendingDrawings.splice(index, 1);
+  document.getElementById('projectPreviewVideo').currentTime = start;
+  renderDrawingProposals();
+  renderOverlayEditor();
+}
+
+async function generateMontageDrawings() {
+  const button = document.getElementById('generateDrawingsBtn');
+  const status = document.getElementById('drawingGenerationStatus');
+  const payload = {};
+  if (selectedProjectId) payload.project_id = selectedProjectId;
+  else if (transcriptJobId) payload.transcript_job_id = transcriptJobId;
+  else {
+    const srt = document.getElementById('montageSrtInput').files[0];
+    if (srt) payload.srt_text = await srt.text();
+  }
+  if (!payload.project_id && !payload.transcript_job_id && !payload.srt_text) {
+    montageError('Сначала выберите проект, транскрибацию или SRT');
+    return;
+  }
+  button.disabled = true;
+  status.textContent = 'OpenCode/GPT анализирует транскрипцию и рисует сцены...';
+  try {
+    const response = await fetch('/api/montage/drawings/generate', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+    pendingDrawings = data.drawings || [];
+    renderDrawingProposals();
+    status.textContent = `GPT предложил рисунков: ${pendingDrawings.length}. Добавьте нужные на таймлайн.`;
+  } catch (error) {
+    status.textContent = `Ошибка GPT: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function addMontageOverlay(file) {
+  if (montageOverlays.length >= 20) {
+    montageError('Можно добавить не более 20 наложений');
+    return;
+  }
+  if (!(file instanceof File) || !/^image\/(png|jpeg|webp)$/.test(file.type)) {
+    montageError('Выберите изображение PNG, JPEG или WebP');
+    return;
+  }
+  const imageUrl = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = imageUrl;
+    await image.decode();
+  } catch (_) {
+    URL.revokeObjectURL(imageUrl);
+    montageError('Не удалось прочитать изображение наложения');
+    return;
+  }
+  const video = document.getElementById('projectPreviewVideo');
+  const duration = montageOverlayDuration();
+  const start = clamp(Number(video.currentTime) || 0, 0, Math.max(0, duration - .05));
+  const end = Math.min(duration, start + Math.min(3, duration));
+  const uid = `overlay-${Date.now().toString(36)}-${++overlaySequence}`;
+  montageOverlays.push({
+    uid, kind:'image', file, imageUrl,
+    name: file.name,
+    start, end: Math.max(start + .05, end), x: .5, y: .5, size: 180,
+    z_index: montageOverlays.length, fps: 1, frames: [imageUrl],
+  });
+  selectedOverlayUid = uid;
+  video.currentTime = start;
+  renderOverlayEditor();
+}
+
+async function handleOverlayUpload(files) {
+  for (const file of [...files]) await addMontageOverlay(file);
+  document.getElementById('montageOverlayUpload').value = '';
+}
+
+function chooseOverlayImage() {
+  document.getElementById('montageOverlayUpload').click();
+}
+
+function overlayAddButtonHtml() {
+  return '<button class="overlay-add-button" type="button" data-overlay-add="1" aria-label="Загрузить картинку как наложение" title="Загрузить картинку">+</button>';
+}
+
+function removeSelectedOverlay() {
+  const removed = selectedMontageOverlay();
+  if (removed?.imageUrl) URL.revokeObjectURL(removed.imageUrl);
+  montageOverlays = montageOverlays.filter(item => item.uid !== selectedOverlayUid);
+  montageOverlays.forEach((item, index) => item.z_index = index);
+  selectedOverlayUid = montageOverlays.at(-1)?.uid || '';
+  renderOverlayEditor();
+}
+
+function updateSelectedOverlayFromInputs() {
+  const overlay = selectedMontageOverlay();
+  if (!overlay) return;
+  const duration = montageOverlayDuration();
+  const startValue = Number(document.getElementById('overlayStart').value);
+  const endValue = Number(document.getElementById('overlayEnd').value);
+  const sizeValue = Number(document.getElementById('overlaySize').value);
+  const drawSpeedValue = Number(document.getElementById('overlayDrawSpeed').value);
+  if (Number.isFinite(startValue)) overlay.start = clamp(startValue, 0, Math.max(0, duration - .05));
+  if (Number.isFinite(endValue)) overlay.end = clamp(endValue, overlay.start + .05, duration);
+  if (overlay.end <= overlay.start) overlay.end = Math.min(duration, overlay.start + .05);
+  if (Number.isFinite(sizeValue)) overlay.size = clamp(Math.round(sizeValue), 20, 1200);
+  if (overlay.kind === 'drawing' && Number.isFinite(drawSpeedValue)) overlay.draw_speed = clamp(drawSpeedValue, 10, 3000);
+  renderOverlayPreview();
+  renderOverlayTimeline();
+  updateOverlayInspector(false);
+}
+
+function updateOverlayInspector(writeInputs = true) {
+  const inspector = document.getElementById('overlayInspector');
+  const overlay = selectedMontageOverlay();
+  inspector.classList.toggle('active', Boolean(overlay));
+  if (!overlay) return;
+  document.getElementById('overlayInspectorName').textContent = overlay.name;
+  if (writeInputs) {
+    const duration = montageOverlayDuration();
+    document.getElementById('overlayStart').max = String(Math.max(0, duration - .05));
+    document.getElementById('overlayEnd').max = String(duration);
+    document.getElementById('overlayStart').value = overlay.start.toFixed(2);
+    document.getElementById('overlayEnd').value = overlay.end.toFixed(2);
+    document.getElementById('overlaySize').value = String(overlay.size);
+    if (overlay.kind === 'drawing') document.getElementById('overlayDrawSpeed').value = String(overlay.draw_speed || 350);
+  }
+  document.getElementById('overlayDrawSpeedGroup').style.display = overlay.kind === 'drawing' ? '' : 'none';
+  document.getElementById('overlayPosition').textContent =
+    `X ${overlay.x.toFixed(2)} · Y ${overlay.y.toFixed(2)} · слой ${overlay.z_index + 1}`;
+}
+
+function overlayLaneMap() {
+  const laneEnds = [];
+  const result = new Map();
+  const sorted = [...montageOverlays].sort((a, b) => a.start - b.start || a.end - b.end || a.z_index - b.z_index);
+  for (const overlay of sorted) {
+    let lane = laneEnds.findIndex(end => end <= overlay.start + .0001);
+    if (lane < 0) {
+      lane = laneEnds.length;
+      laneEnds.push(overlay.end);
+    } else {
+      laneEnds[lane] = overlay.end;
+    }
+    result.set(overlay.uid, lane);
+  }
+  return {map: result, count: Math.max(1, laneEnds.length)};
+}
+
+function renderOverlayTimeline() {
+  const root = document.getElementById('overlayTimeline');
+  const duration = montageOverlayDuration();
+  if (!montageOverlays.length) {
+    root.style.height = '44px';
+    root.innerHTML = '<div class="overlay-timeline-empty">Добавьте картинку кнопкой +</div>' + overlayAddButtonHtml();
+    return;
+  }
+  const lanes = overlayLaneMap();
+  root.style.height = `${lanes.count * 38 + 46}px`;
+  root.innerHTML = montageOverlays.map(overlay => {
+    const left = clamp(overlay.start / duration * 100, 0, 100);
+    const width = clamp((overlay.end - overlay.start) / duration * 100, .5, 100 - left);
+    const lane = lanes.map.get(overlay.uid) || 0;
+    return `<div class="overlay-clip${overlay.uid === selectedOverlayUid ? ' selected' : ''}" data-overlay-uid="${encodeURIComponent(overlay.uid)}" style="left:${left}%;width:${width}%;top:${42 + lane * 38}px">
+      <span class="overlay-clip-handle left" data-resize="left"></span>
+      <span class="overlay-clip-label">${esc(overlay.name)}</span>
+      <span class="overlay-clip-handle right" data-resize="right"></span>
+    </div>`;
+  }).join('') + `<div class="overlay-timeline-caption">Наложения</div><div class="overlay-timeline-playhead" style="top:38px;left:${clamp((Number(document.getElementById('projectPreviewVideo').currentTime) || 0) / duration * 100, 0, 100)}%"></div>` + overlayAddButtonHtml();
+}
+
+function mountOverlayPreviewItem(item, uid) {
+  const pointers = new Map();
+  let gesture = null;
+  const trash = document.getElementById('overlayTrash');
+  const pointerDistance = values => Math.hypot(values[0].x - values[1].x, values[0].y - values[1].y);
+
+  function beginPinch(overlay) {
+    const values = [...pointers.values()];
+    gesture = {mode:'pinch', startDistance:pointerDistance(values), startSize:overlay.size, armed:false};
+    trash.classList.remove('active', 'armed');
+  }
+
+  item.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    const overlay = montageOverlays.find(entry => entry.uid === uid);
+    if (!overlay) return;
+    selectedOverlayUid = uid;
+    pointers.set(event.pointerId, {x:event.clientX, y:event.clientY});
+    item.setPointerCapture(event.pointerId);
+    const resizeHandle = event.target.closest('[data-preview-resize]');
+    if (pointers.size === 2) {
+      beginPinch(overlay);
+    } else if (resizeHandle) {
+      const rect = item.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      gesture = {
+        mode:'resize', centerX, centerY, startSize:overlay.size,
+        startDistance:Math.max(1, Math.hypot(event.clientX - centerX, event.clientY - centerY)), armed:false,
+      };
+    } else {
+      gesture = {mode:'drag', x:event.clientX, y:event.clientY, overlayX:overlay.x, overlayY:overlay.y, armed:false};
+    }
+    renderOverlayTimeline();
+    updateOverlayInspector();
+    renderOverlayPreview();
+  });
+  item.addEventListener('pointermove', event => {
+    if (!gesture || !pointers.has(event.pointerId)) return;
+    const overlay = montageOverlays.find(entry => entry.uid === uid);
+    const rect = document.getElementById('projectPreviewVideo').getBoundingClientRect();
+    if (!overlay || !rect.width || !rect.height) return;
+    pointers.set(event.pointerId, {x:event.clientX, y:event.clientY});
+    if (pointers.size >= 2) {
+      if (gesture.mode !== 'pinch') beginPinch(overlay);
+      const distance = pointerDistance([...pointers.values()]);
+      if (gesture.startDistance > 0) overlay.size = clamp(Math.round(gesture.startSize * distance / gesture.startDistance), 20, 1200);
+    } else if (gesture.mode === 'resize') {
+      const distance = Math.hypot(event.clientX - gesture.centerX, event.clientY - gesture.centerY);
+      overlay.size = clamp(Math.round(gesture.startSize * distance / gesture.startDistance), 20, 1200);
+      trash.classList.remove('active', 'armed');
+    } else if (gesture.mode === 'drag') {
+      overlay.x = clamp(gesture.overlayX + (event.clientX - gesture.x) / rect.width, 0, 1);
+      overlay.y = clamp(gesture.overlayY + (event.clientY - gesture.y) / rect.height, 0, 1);
+      const showTrash = event.clientY - gesture.y > 14;
+      trash.classList.toggle('active', showTrash);
+      const trashRect = trash.getBoundingClientRect();
+      gesture.armed = showTrash && event.clientX >= trashRect.left && event.clientX <= trashRect.right
+        && event.clientY >= trashRect.top && event.clientY <= trashRect.bottom;
+      trash.classList.toggle('armed', gesture.armed);
+    }
+    renderOverlayPreview();
+    updateOverlayInspector(false);
+  });
+  function endPointer(event) {
+    const shouldDelete = pointers.size === 1 && Boolean(gesture?.armed);
+    pointers.delete(event.pointerId);
+    trash.classList.remove('active', 'armed');
+    if (shouldDelete) {
+      selectedOverlayUid = uid;
+      removeSelectedOverlay();
+      gesture = null;
+      return;
+    }
+    const overlay = montageOverlays.find(entry => entry.uid === uid);
+    if (pointers.size === 1 && overlay) {
+      const remaining = [...pointers.values()][0];
+      gesture = {mode:'drag', x:remaining.x, y:remaining.y, overlayX:overlay.x, overlayY:overlay.y, armed:false};
+    } else if (!pointers.size) {
+      gesture = null;
+    }
+  }
+  item.addEventListener('pointerup', endPointer);
+  item.addEventListener('pointercancel', endPointer);
+}
+
+function renderOverlayPreview() {
+  const layer = document.getElementById('overlayPreviewLayer');
+  const video = document.getElementById('projectPreviewVideo');
+  if (!layer || !video) return;
+  const time = Number(video.currentTime) || 0;
+  const sourceScale = video.videoWidth && video.videoHeight
+    ? Math.min(video.clientWidth / video.videoWidth, video.clientHeight / video.videoHeight)
+    : video.clientWidth / 1080;
+  const active = new Set();
+  for (const overlay of montageOverlays) {
+    if (!(overlay.start - .01 <= time && time < overlay.end)) continue;
+    if (overlay.kind !== 'drawing' && !overlay.frames?.length) continue;
+    active.add(overlay.uid);
+    let item = [...layer.children].find(child => child.dataset.overlayUid === overlay.uid);
+    if (!item) {
+      item = document.createElement('div');
+      item.className = 'overlay-preview-item';
+      item.dataset.overlayUid = overlay.uid;
+      item.innerHTML = `${overlay.kind === 'drawing' ? '<div class="drawing-host"></div>' : `<img alt="${esc(overlay.name)}" draggable="false">`}
+        <span class="overlay-resize-handle nw" data-preview-resize="nw"></span>
+        <span class="overlay-resize-handle ne" data-preview-resize="ne"></span>
+        <span class="overlay-resize-handle sw" data-preview-resize="sw"></span>
+        <span class="overlay-resize-handle se" data-preview-resize="se"></span>`;
+      mountOverlayPreviewItem(item, overlay.uid);
+      layer.appendChild(item);
+    }
+    let ratio = 1;
+    if (overlay.kind === 'drawing') {
+      const drawing = overlay.drawing || {};
+      ratio = (Number(drawing.width) || 1) / (Number(drawing.height) || 1);
+      item.querySelector('.drawing-host').innerHTML = drawingSvgMarkup(
+        drawing,
+        Math.max(0, time - overlay.start) * (Number(overlay.draw_speed) || 350),
+      );
+    } else {
+      const image = item.querySelector('img');
+      const frameIndex = Math.floor((time - overlay.start) * overlay.fps) % overlay.frames.length;
+      const frameUrl = overlay.frames[frameIndex];
+      if (image.dataset.frame !== frameUrl) {
+        image.dataset.frame = frameUrl;
+        image.src = frameUrl;
+        image.onload = renderOverlayPreview;
+      }
+      ratio = image.naturalWidth && image.naturalHeight ? image.naturalWidth / image.naturalHeight : 1;
+    }
+    const maxSize = Math.max(20, overlay.size * sourceScale);
+    item.style.width = `${ratio >= 1 ? maxSize : maxSize * ratio}px`;
+    item.style.height = `${ratio >= 1 ? maxSize / ratio : maxSize}px`;
+    item.style.left = `${overlay.x * 100}%`;
+    item.style.top = `${overlay.y * 100}%`;
+    item.style.zIndex = String(overlay.z_index + 1);
+    item.classList.toggle('selected', overlay.uid === selectedOverlayUid);
+  }
+  for (const item of [...layer.children]) {
+    if (!active.has(item.dataset.overlayUid)) item.remove();
+  }
+}
+
+function renderOverlayEditor() {
+  renderOverlayTimeline();
+  renderOverlayPreview();
+  updateOverlayInspector();
+}
+
+let overlayTimelineGesture = null;
+function mountOverlayTimeline() {
+  const root = document.getElementById('overlayTimeline');
+  const video = document.getElementById('projectPreviewVideo');
+  root.addEventListener('pointerdown', event => {
+    if (event.target.closest('[data-overlay-add]')) {
+      event.preventDefault();
+      chooseOverlayImage();
+      return;
+    }
+    const clip = event.target.closest('.overlay-clip');
+    const duration = montageOverlayDuration();
+    const rect = root.getBoundingClientRect();
+    if (!clip) {
+      video.currentTime = clamp((event.clientX - rect.left) / rect.width, 0, 1) * duration;
+      renderOverlayEditor();
+      return;
+    }
+    event.preventDefault();
+    const uid = decodeURIComponent(clip.dataset.overlayUid);
+    const overlay = montageOverlays.find(item => item.uid === uid);
+    if (!overlay) return;
+    selectedOverlayUid = uid;
+    const mode = event.target.dataset.resize || 'move';
+    overlayTimelineGesture = {uid, mode, clientX:event.clientX, start:overlay.start, end:overlay.end};
+    root.setPointerCapture(event.pointerId);
+    video.currentTime = mode === 'right' ? overlay.end : overlay.start;
+    renderOverlayEditor();
+  });
+  root.addEventListener('pointermove', event => {
+    if (!overlayTimelineGesture) return;
+    const overlay = montageOverlays.find(item => item.uid === overlayTimelineGesture.uid);
+    const duration = montageOverlayDuration();
+    if (!overlay) return;
+    const delta = (event.clientX - overlayTimelineGesture.clientX) / root.getBoundingClientRect().width * duration;
+    if (overlayTimelineGesture.mode === 'left') {
+      overlay.start = clamp(overlayTimelineGesture.start + delta, 0, overlay.end - .05);
+      video.currentTime = Math.min(overlay.end - .001, overlay.start + .001);
+    } else if (overlayTimelineGesture.mode === 'right') {
+      overlay.end = clamp(overlayTimelineGesture.end + delta, overlay.start + .05, duration);
+      video.currentTime = Math.max(overlay.start, overlay.end - .001);
+    } else {
+      const length = overlayTimelineGesture.end - overlayTimelineGesture.start;
+      overlay.start = clamp(overlayTimelineGesture.start + delta, 0, Math.max(0, duration - length));
+      overlay.end = overlay.start + length;
+      video.currentTime = Math.min(overlay.end - .001, overlay.start + .001);
+    }
+    renderOverlayEditor();
+  });
+  const endGesture = () => { overlayTimelineGesture = null; };
+  root.addEventListener('pointerup', endGesture);
+  root.addEventListener('pointercancel', endGesture);
 }
 
 function updateSubtitlePreviewStyle() {
@@ -2162,8 +2810,7 @@ async function saveAnimation() {
     if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
     status.textContent = `Анимация «${data.animation.name}» сохранена и добавлена в автомонтаж.`;
     await loadAnimationOptions();
-    const select = document.getElementById('montageAnimationId');
-    select.value = data.animation.id;
+    document.getElementById('montageAnimationId').value = data.animation.id;
     await updateAnimationPreview();
   } catch (error) {
     status.textContent = `Ошибка: ${error.message}`;
@@ -2300,18 +2947,44 @@ async function startMontage() {
   form.append('face_tracking', document.getElementById('montageFaceTrack').checked);
   form.append('autozoom', document.getElementById('montageAutozoom').checked);
   form.append('mirror_horizontal', document.getElementById('montageMirrorHorizontal').checked);
+  form.append('blur_banned_words', document.getElementById('montageBlurBannedWords').checked);
   form.append('propose_cover', document.getElementById('montageProposeCover').checked);
   form.append('cover_title', document.getElementById('montageAutoCoverTitle').value.trim());
   form.append('subtitles', true);
   form.append('bigpickle', document.getElementById('montageBigpickle').checked);
 
-  const animId = document.getElementById('montageAnimationId').value;
-  if (animId) {
-    form.append('animation_id', animId);
+  const animationId = document.getElementById('montageAnimationId').value;
+  if (animationId) {
+    form.append('animation_id', animationId);
     form.append('animation_start', document.getElementById('montageAnimationStart').value || 0);
     form.append('animation_offset_x', document.getElementById('montageAnimationOffset').value || 0);
-    form.append('animation_bar', false);
+    form.append('animation_item_size', 72);
   }
+  let overlayFileIndex = 0;
+  const overlayPayload = montageOverlays.map((overlay, index) => {
+    const payload = {
+      uid: overlay.uid,
+      kind: overlay.kind,
+      name: overlay.name,
+      start: overlay.start,
+      end: overlay.end,
+      x: overlay.x,
+      y: overlay.y,
+      size: overlay.size,
+      z_index: index,
+    };
+    if (overlay.kind === 'drawing') {
+      payload.trigger_text = overlay.trigger_text || '';
+      payload.draw_speed = overlay.draw_speed;
+      payload.drawing = overlay.drawing;
+    } else {
+      form.append('overlay_files', overlay.file, overlay.file.name);
+      payload.kind = 'image';
+      payload.file_index = overlayFileIndex++;
+    }
+    return payload;
+  });
+  form.append('overlays_json', JSON.stringify(overlayPayload));
   if (document.getElementById('montageZoomOverride').checked) {
     const raw = document.getElementById('montageZoomTimeline').value.trim();
     try {
@@ -2441,15 +3114,17 @@ async function refreshMontageResult() {
       if (eS) eS.value = eS.value || '1.00';
 
       const tl = data.result.timeline;
+      const resultOverlays = tl?.overlays || [];
       const zoomMarks = [];
       if (tl && tl.zoom) {
         for (const z of tl.zoom) {
           zoomMarks.push({ time: timecodeToSec(z.timecode != null ? z.timecode : z.time) });
         }
       }
-      if (tl && tl.animation) {
-        zoomMarks.push({ time: Number(tl.animation.start) || 0, cls: 'anim' });
+      if (resultOverlays.length) {
+        for (const overlay of resultOverlays) zoomMarks.push({ time: Number(overlay.start) || 0, cls: 'anim' });
       }
+      if (tl?.animation) zoomMarks.push({ time: Number(tl.animation.start) || 0, cls: 'anim' });
       buildKeybar({
         keybar: 'montageVideoKeybar', markers: 'montageVideoMarkers', playhead: 'montageVideoPlayhead',
         video: 'montageVideo', cur: 'montageVideoCur', dur: 'montageVideoDur'
@@ -2460,7 +3135,8 @@ async function refreshMontageResult() {
         let html = `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
           <span class="badge" style="background:#23304a">Позиция: ${esc(tl.subtitle_position)}</span>
           <span class="badge" style="background:#23304a">Режим: ${esc(tl.subtitle_mode)}</span>
-          ${tl.animation ? `<span class="badge ok">Анимация: ${esc(tl.animation.id)} (старт ${tl.animation.start}s)</span>` : ''}
+          ${resultOverlays.length ? `<span class="badge ok">Наложения: ${resultOverlays.length}</span>` : ''}
+          ${tl.animation ? `<span class="badge up">Анимация таймлайна: ${esc(tl.animation.id)} (${tl.animation.start}s)</span>` : ''}
         </div>`;
         if (tl.zoom && tl.zoom.length) {
           html += '<table style="width:100%;font-size:12px;border-collapse:collapse">';
@@ -2765,6 +3441,19 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
 }
 
+for (const eventName of ['gesturestart', 'gesturechange', 'gestureend']) {
+  document.addEventListener(eventName, event => event.preventDefault(), {passive:false});
+}
+document.addEventListener('touchmove', event => {
+  if (event.touches.length > 1 && !event.target.closest?.('.overlay-preview-item')) event.preventDefault();
+}, {passive:false});
+document.addEventListener('wheel', event => {
+  if (event.ctrlKey || event.metaKey) event.preventDefault();
+}, {passive:false});
+document.addEventListener('keydown', event => {
+  if ((event.ctrlKey || event.metaKey) && ['+', '=', '-', '0'].includes(event.key)) event.preventDefault();
+});
+
 window.__subDragMounted = true;
 window.__projectOverlay = mountSubtitleOverlay({
   video: 'projectPreviewVideo', card: 'projectPreviewSubCard', text: 'projectPreviewSubText',
@@ -2772,8 +3461,17 @@ window.__projectOverlay = mountSubtitleOverlay({
   placeholder: '…',
 });
 const projectPreviewVideo = document.getElementById('projectPreviewVideo');
-projectPreviewVideo.addEventListener('timeupdate', syncAnimationPreview);
-projectPreviewVideo.addEventListener('loadedmetadata', syncAnimationPreview);
+projectPreviewVideo.addEventListener('timeupdate', () => {
+  renderOverlayPreview();
+  syncAnimationPreview();
+  const playhead = document.querySelector('#overlayTimeline .overlay-timeline-playhead');
+  if (playhead) playhead.style.left = `${clamp((projectPreviewVideo.currentTime || 0) / montageOverlayDuration() * 100, 0, 100)}%`;
+});
+projectPreviewVideo.addEventListener('loadedmetadata', () => {
+  renderOverlayEditor();
+  syncAnimationPreview();
+});
+mountOverlayTimeline();
 updateSubtitlePreviewStyle();
 
 loadAnimationOptions();

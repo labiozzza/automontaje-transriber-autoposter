@@ -1,4 +1,4 @@
-import os, json, uuid, asyncio, subprocess, time, re, tempfile, hashlib, urllib.request, importlib, threading, gc, sys
+import os, json, uuid, asyncio, subprocess, time, re, tempfile, hashlib, urllib.request, importlib, threading, gc, math, io, sys
 import shutil
 import traceback
 from pathlib import Path
@@ -363,7 +363,7 @@ async def process_job(job_id: str, params: dict):
         result = await asyncio.to_thread(
             run_whisper_job, model_name, wav_output, model_progress, model_load_start,
             transcription_start, transcription_progress,
-            language=language, word_timestamps=(mode == "words")
+            language=language, word_timestamps=True
         )
         segments = result["segments"]
 
@@ -422,7 +422,7 @@ def merge_results(segments, diarization, mode):
 
             if mode == "words" and "words" in seg:
                 word_groups = []
-                current_group = {"words": [], "speaker": None, "start": start, "end": start}
+                current_group = {"words": [], "word_timestamps": [], "speaker": None, "start": start, "end": start}
 
                 for word_info in seg["words"]:
                     w_start = word_info["start"]
@@ -435,9 +435,10 @@ def merge_results(segments, diarization, mode):
                         current_group["end"] = w_start
                         current_group["text"] = " ".join(current_group["words"])
                         word_groups.append(current_group)
-                        current_group = {"words": [], "speaker": speaker, "start": w_start, "end": w_start}
+                        current_group = {"words": [], "word_timestamps": [], "speaker": speaker, "start": w_start, "end": w_start}
 
                     current_group["words"].append(w_text.strip())
+                    current_group["word_timestamps"].append(word_info)
                     current_group["end"] = w_end
 
                 if current_group["words"]:
@@ -452,6 +453,7 @@ def merge_results(segments, diarization, mode):
                     "end": end,
                     "text": seg["text"].strip(),
                     "speaker": speaker,
+                    "words": seg.get("words") or [],
                 })
     else:
         for seg in segments:
@@ -469,6 +471,7 @@ def merge_results(segments, diarization, mode):
                     "end": seg["end"],
                     "text": seg["text"].strip(),
                     "speaker": None,
+                    "words": seg.get("words") or [],
                 })
 
     return result_segments
@@ -829,6 +832,40 @@ async def get_result(job_id: str):
     return {"segments": job["result"], "original_name": job["original_name"]}
 
 
+@app.patch("/api/result/{job_id}")
+async def save_result(job_id: str, request: Request):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job.get("status") != "done" or not isinstance(job.get("result"), list):
+        raise HTTPException(400, "Job not completed")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Некорректный JSON")
+    texts = payload.get("texts") if isinstance(payload, dict) else None
+    if not isinstance(texts, list) or len(texts) != len(job["result"]):
+        raise HTTPException(400, "Количество сегментов не совпадает с транскрипцией")
+    if any(not isinstance(text, str) for text in texts):
+        raise HTTPException(400, "Текст каждого сегмента должен быть строкой")
+
+    normalized = [text.replace("\r\n", "\n").replace("\r", "\n").strip() for text in texts]
+    if any("\x00" in text or len(text) > 20_000 for text in normalized):
+        raise HTTPException(400, "Один из сегментов содержит недопустимый текст")
+    if sum(len(text) for text in normalized) > 1_000_000:
+        raise HTTPException(400, "Транскрипция слишком большая")
+    if not any(normalized):
+        raise HTTPException(400, "Транскрипция не может быть пустой")
+
+    job["result"] = [
+        {**segment, "text": text}
+        for segment, text in zip(job["result"], normalized)
+    ]
+    job["transcript_updated_at"] = datetime.now().isoformat()
+    return {"segments": job["result"], "saved": True}
+
+
 @app.get("/api/export/{job_id}/{format_name}")
 async def export_file(
     job_id: str,
@@ -882,16 +919,195 @@ from montage.secrets_env import load_secrets_env
 load_secrets_env()
 from montage import engine as montage_engine
 from montage import cover_generator
+from montage import drawing_generator
+
+_drawing_generation_lock = asyncio.Lock()
 
 app.mount("/animation-assets", StaticFiles(directory=str(montage_engine.ANIMATIONS_DIR)), name="animation-assets")
 app.mount("/font-assets", StaticFiles(directory=str(montage_engine.FONTS_DIR)), name="font-assets")
+
+
+_RENDER_CLEANUP_FILES = (
+    "normalized_source.mp4",
+    "mirrored_source.mp4",
+    "zoom.mp4",
+    "sub_sentences.mp4",
+    "sub_words.mp4",
+    "sub_phrases.mp4",
+    "with_visual_layers.mp4",
+    "with_animation.mp4",
+    "censored_audio.mp4",
+    "face_tracking.json",
+    "zoom_timeline_config.json",
+    "subtitle_timeline_config.json",
+    "subtitle_timeline_config_words.json",
+    "subtitle_timeline_config_phrases.json",
+    "overlay_timeline_config.json",
+)
+
+
+def _safe_montage_workdir(job_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", str(job_id)):
+        raise ValueError("Недопустимый идентификатор задания")
+    root = MONTAGE_WORK.resolve()
+    workdir = MONTAGE_WORK / str(job_id)
+    if workdir.is_symlink() or workdir.resolve(strict=False).parent != root:
+        raise ValueError("Каталог задания находится вне montage_work")
+    return workdir
+
+
+def _protected_montage_paths(job: dict, workdir: Path) -> set[Path]:
+    protected = set()
+    result = job.get("result") or {}
+    for key in ("result_video", "preview_video"):
+        raw = result.get(key)
+        if not raw:
+            continue
+        path = Path(str(raw))
+        if not path.is_absolute():
+            path = workdir / path
+        protected.add(Path(os.path.abspath(str(path))))
+    return protected
+
+
+def _cleanup_path_is_protected(path: Path, protected: set[Path], recursive: bool) -> bool:
+    normalized = Path(os.path.abspath(str(path)))
+    for item in protected:
+        if item == normalized:
+            return True
+        if recursive:
+            try:
+                item.relative_to(normalized)
+                return True
+            except ValueError:
+                pass
+    return False
+
+
+def _remove_cleanup_path(path: Path, recursive: bool) -> None:
+    if path.is_symlink():
+        path.unlink()
+    elif recursive and path.is_dir():
+        shutil.rmtree(path)
+    elif not recursive and path.is_file():
+        path.unlink()
+
+
+def _write_cleanup_log(workdir: Path, summary: dict) -> None:
+    line = json.dumps(
+        {"timestamp": datetime.now().isoformat(), **summary},
+        ensure_ascii=False,
+        default=str,
+    )
+    try:
+        with (workdir / "cleanup.log").open("a", encoding="utf-8") as log:
+            log.write(line + "\n")
+    except Exception as exc:
+        print(f"[montage-cleanup] could not write log for {workdir.name}: {exc}", file=sys.stderr)
+    try:
+        print(f"[montage-cleanup] {workdir.name}: {line}")
+    except Exception:
+        pass
+
+
+def _cleanup_allowed_paths(job_id: str, job: dict, phase: str, candidates: list[tuple[Path, bool]]) -> dict:
+    try:
+        workdir = _safe_montage_workdir(job_id)
+    except Exception as exc:
+        summary = {"phase": phase, "removed": [], "protected": [], "errors": [str(exc)]}
+        print(f"[montage-cleanup] {job_id}: {json.dumps(summary, ensure_ascii=False)}", file=sys.stderr)
+        return summary
+
+    summary = {"phase": phase, "removed": [], "protected": [], "errors": []}
+    try:
+        protected = _protected_montage_paths(job, workdir)
+    except Exception as exc:
+        summary["errors"].append(f"метаданные результата: {exc}")
+        _write_cleanup_log(workdir, summary)
+        return summary
+    for path, recursive in candidates:
+        try:
+            if path.parent != workdir:
+                summary["errors"].append(f"{path.name}: путь вне каталога задания")
+                continue
+            if _cleanup_path_is_protected(path, protected, recursive):
+                summary["protected"].append(path.name)
+                continue
+            if not path.exists() and not path.is_symlink():
+                continue
+            _remove_cleanup_path(path, recursive)
+            if not path.exists() and not path.is_symlink():
+                summary["removed"].append(path.name)
+        except Exception as exc:
+            summary["errors"].append(f"{path.name}: {exc}")
+    _write_cleanup_log(workdir, summary)
+    return summary
+
+
+def _cleanup_render_artifacts(job_id: str, job: dict) -> dict:
+    if job.get("status") != "done" or not job.get("result"):
+        return {"phase": "render", "removed": [], "protected": [], "errors": []}
+    try:
+        workdir = _safe_montage_workdir(job_id)
+    except Exception as exc:
+        summary = {"phase": "render", "removed": [], "protected": [], "errors": [str(exc)]}
+        print(f"[montage-cleanup] {job_id}: {json.dumps(summary, ensure_ascii=False)}", file=sys.stderr)
+        return summary
+    try:
+        candidates = [(workdir / name, False) for name in _RENDER_CLEANUP_FILES]
+        return _cleanup_allowed_paths(job_id, job, "render", candidates)
+    except Exception as exc:
+        summary = {"phase": "render", "removed": [], "protected": [], "errors": [str(exc)]}
+        _write_cleanup_log(workdir, summary)
+        return summary
+
+
+def _cleanup_publish_artifacts(job_id: str, job: dict) -> dict:
+    if job.get("status") != "done" or job.get("stage") != "published" or job.get("publish_errors"):
+        return {"phase": "publish", "removed": [], "protected": [], "errors": []}
+    try:
+        workdir = _safe_montage_workdir(job_id)
+    except Exception as exc:
+        summary = {"phase": "publish", "removed": [], "protected": [], "errors": [str(exc)]}
+        print(f"[montage-cleanup] {job_id}: {json.dumps(summary, ensure_ascii=False)}", file=sys.stderr)
+        return summary
+    try:
+        candidates = [
+            (workdir / "publish_mirrored", True),
+            (workdir / "staging", True),
+            (workdir / "youtube_staging", True),
+            (workdir / f"{job_id}_tg.mp4", False),
+        ]
+        return _cleanup_allowed_paths(job_id, job, "publish", candidates)
+    except Exception as exc:
+        summary = {"phase": "publish", "removed": [], "protected": [], "errors": [str(exc)]}
+        _write_cleanup_log(workdir, summary)
+        return summary
+
+
+def _run_cleanup_safely(cleanup, job_id: str, job: dict) -> dict:
+    try:
+        return cleanup(job_id, job)
+    except Exception as exc:
+        summary = {
+            "phase": "publish" if cleanup is _cleanup_publish_artifacts else "render",
+            "removed": [],
+            "protected": [],
+            "errors": [str(exc)],
+        }
+        try:
+            workdir = _safe_montage_workdir(job_id)
+            _write_cleanup_log(workdir, summary)
+        except Exception:
+            pass
+        return summary
 
 
 def _save_montage_job(job_id: str) -> None:
     job = jobs.get(job_id)
     if not job or job.get("kind") != "montage":
         return
-    workdir = MONTAGE_WORK / job_id
+    workdir = _safe_montage_workdir(job_id)
     workdir.mkdir(parents=True, exist_ok=True)
     target = workdir / "job_state.json"
     temporary = workdir / ".job_state.json.tmp"
@@ -900,8 +1116,12 @@ def _save_montage_job(job_id: str) -> None:
 
 
 def _recover_montage_jobs() -> None:
+    root = MONTAGE_WORK.resolve()
     workdirs = sorted(
-        (path for path in MONTAGE_WORK.iterdir() if path.is_dir()),
+        (
+            path for path in MONTAGE_WORK.iterdir()
+            if not path.is_symlink() and path.is_dir() and path.resolve().parent == root
+        ),
         key=lambda path: path.stat().st_mtime,
     )[-20:]
     for workdir in workdirs:
@@ -910,6 +1130,9 @@ def _recover_montage_jobs() -> None:
             try:
                 job = json.loads(state_path.read_text(encoding="utf-8"))
                 if job.get("kind") == "montage" and (job.get("result") or {}).get("result_video"):
+                    if str(job.get("id") or "") != workdir.name:
+                        continue
+                    recovered_after_interruption = False
                     if not job.get("selected_cover_id"):
                         prepared_cover = next((workdir / "covers").glob(".*-instagram.jpg"), None)
                         if prepared_cover:
@@ -923,7 +1146,14 @@ def _recover_montage_jobs() -> None:
                             str(item.get("id")): "Попытка была прервана перезапуском; повторите публикацию"
                             for item in targets if item.get("id")
                         }
-                    jobs[str(job["id"])] = job
+                        recovered_after_interruption = True
+                    recovered_id = str(job["id"])
+                    jobs[recovered_id] = job
+                    if recovered_after_interruption:
+                        _save_montage_job(recovered_id)
+                    _run_cleanup_safely(_cleanup_render_artifacts, recovered_id, job)
+                    if job.get("stage") == "published" and not job.get("publish_errors"):
+                        _run_cleanup_safely(_cleanup_publish_artifacts, recovered_id, job)
                     continue
             except Exception:
                 pass
@@ -991,6 +1221,7 @@ def _recover_montage_jobs() -> None:
             "cover_error": None,
         }
         _save_montage_job(job_id)
+        _run_cleanup_safely(_cleanup_render_artifacts, job_id, jobs[job_id])
 
 
 _recover_montage_jobs()
@@ -1037,6 +1268,45 @@ async def process_montage(job_id: str, params: dict):
         if not srt_text.strip():
             raise RuntimeError("Нет текста: загрузите SRT или укажите готовую транскрибацию")
 
+        censor_srt_text = srt_text
+        if params.get("blur_banned_words"):
+            source_job = jobs.get(transcript_job) or {}
+            exact_word_srt = montage_engine.build_word_timing_srt(source_job.get("result") or [])
+            if exact_word_srt.strip():
+                censor_srt_text = exact_word_srt
+
+        if params.get("blur_banned_words") and montage_engine.needs_word_alignment(censor_srt_text):
+            await _montage_announce(job_id, "Уточнение таймкодов слов для цензуры...")
+            source_job = jobs.get(transcript_job) or {}
+            source_params = source_job.get("params") or {}
+            model_name = str(source_params.get("model") or "small")
+            language = str(source_params.get("language") or "ru")
+
+            def alignment_progress(ratio: float) -> None:
+                progress(2 + ratio * 4, "audio_censor", f"Таймкоды слов: {ratio * 100:.0f}%")
+
+            aligned = await asyncio.to_thread(
+                run_whisper_job,
+                model_name,
+                str(video),
+                lambda *_: None,
+                lambda: None,
+                lambda: None,
+                alignment_progress,
+                language=language,
+                word_timestamps=True,
+            )
+            aligned_srt = montage_engine.build_word_timing_srt(aligned.get("segments") or [])
+            if not aligned_srt.strip() or montage_engine.needs_word_alignment(aligned_srt):
+                raise RuntimeError("Не удалось определить точные таймкоды нежелательных слов")
+            censor_srt_text = aligned_srt
+
+        render_params = dict(params)
+        if params.get("blur_banned_words"):
+            render_params["audio_censor_srt"] = censor_srt_text
+            job["audio_censor_srt"] = censor_srt_text
+            _save_montage_job(job_id)
+
         if params.get("face_tracking", True) and not status["face_model"]:
             await broadcast_progress(job_id, 3, "model", "Загрузка модели face_landmarker.task...")
             download_face_model(job_id, progress)
@@ -1052,7 +1322,7 @@ async def process_montage(job_id: str, params: dict):
             workdir=workdir,
             source_video=video,
             srt_text=srt_text,
-            options=params,
+            options=render_params,
             progress_cb=progress,
             log_cb=lambda message: asyncio.run_coroutine_threadsafe(
                 _montage_announce(job_id, message), loop
@@ -1065,6 +1335,7 @@ async def process_montage(job_id: str, params: dict):
         job["detail"] = "Готово"
         job["result"] = meta
         _save_montage_job(job_id)
+        _run_cleanup_safely(_cleanup_render_artifacts, job_id, job)
         await broadcast_progress(job_id, 100, "done", "Рендер завершён")
         await _montage_announce(job_id, f"Готово: {Path(meta['result_video']).name} ({(os.path.getsize(meta['result_video']) >> 20)} МБ)")
     except Exception as e:
@@ -1190,6 +1461,28 @@ async def process_publish(job_id: str, targets: list):
                 await _montage_announce(job_id, "Подготовка отражённой версии...")
                 alternate_options = dict(job.get("params") or {})
                 alternate_options["mirror_horizontal"] = not bool(alternate_options.get("mirror_horizontal"))
+                if job.get("audio_censor_srt"):
+                    alternate_options["audio_censor_srt"] = job["audio_censor_srt"]
+                alternate_workdir = workdir / "publish_mirrored"
+                alternate_overlays = []
+                overlay_root = (workdir / "overlays").resolve()
+                for index, overlay in enumerate(alternate_options.get("overlays") or []):
+                    staged_overlay = dict(overlay)
+                    if str(staged_overlay.get("kind") or "") == "image":
+                        source_image = Path(str(staged_overlay.get("image_path") or "")).resolve()
+                        try:
+                            source_image.relative_to(overlay_root)
+                        except ValueError:
+                            raise RuntimeError("Файл наложения находится вне каталога задания")
+                        if not source_image.is_file():
+                            raise RuntimeError(f"Изображение наложения не найдено: {source_image.name}")
+                        staged_dir = alternate_workdir / "overlays"
+                        staged_dir.mkdir(parents=True, exist_ok=True)
+                        staged_image = staged_dir / f"overlay_{index + 1:02d}{source_image.suffix.lower()}"
+                        shutil.copy2(source_image, staged_image)
+                        staged_overlay["image_path"] = str(staged_image)
+                    alternate_overlays.append(staged_overlay)
+                alternate_options["overlays"] = alternate_overlays
 
                 def alternate_progress(percent: float, stage: str, detail: str) -> None:
                     progress(min(20, percent * 0.2), f"mirror_{stage}", detail)
@@ -1197,7 +1490,7 @@ async def process_publish(job_id: str, targets: list):
                 alternate = await asyncio.to_thread(
                     montage_engine.render_montage,
                     job_id=f"{job_id}_mirror",
-                    workdir=workdir / "publish_mirrored",
+                    workdir=alternate_workdir,
                     source_video=Path(job["video_path"]),
                     srt_text=job["srt_text"],
                     options=alternate_options,
@@ -1213,6 +1506,9 @@ async def process_publish(job_id: str, targets: list):
                             status="queued", detail="Отражённая версия готова"
                         )
             except Exception as exc:
+                for target in targets:
+                    if target.get("mirrored"):
+                        target["preparation_error"] = str(exc)
                 await _montage_announce(job_id, f"Отражённая версия не подготовлена: {exc}")
 
         await _montage_announce(job_id, "Публикация...")
@@ -1243,14 +1539,22 @@ async def process_publish(job_id: str, targets: list):
                 _montage_announce(job_id, message), loop
             ),
         )
+        publish_results = dict(result.get("results") or {})
+        publish_errors = dict(result.get("errors") or {})
+        expected_targets = {str(target.get("id") or target.get("kind") or "") for target in targets}
+        for missing in expected_targets - publish_results.keys() - publish_errors.keys():
+            if missing:
+                publish_errors[missing] = "Публикация не вернула результат"
         job["status"] = "done"
         job["progress"] = 100
         job["stage"] = "published"
-        job["publish"] = {**previous_publish, **result["results"]}
-        job["publish_errors"] = result.get("errors") or {}
+        job["publish"] = {**previous_publish, **publish_results}
+        job["publish_errors"] = publish_errors
         detail = "Публикация завершена" if not job["publish_errors"] else "Публикация завершена с ошибками"
         job["detail"] = detail
         _save_montage_job(job_id)
+        if not job["publish_errors"]:
+            _run_cleanup_safely(_cleanup_publish_artifacts, job_id, job)
         await broadcast_progress(job_id, 100, "published", detail)
     except Exception as e:
         job["status"] = "error"
@@ -1316,10 +1620,55 @@ async def download_comfortaa_font():
     return {"font": {"id": target.name, "name": "Comfortaa", "path": str(target)}}
 
 
+@app.post("/api/montage/drawings/generate")
+async def generate_montage_drawings(request: Request):
+    client_host = request.client.host if request.client else ""
+    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(403, "Генерация рисунков доступна только локально")
+    origin = request.headers.get("origin", "")
+    if origin and origin not in {
+        "http://127.0.0.1:8000", "http://localhost:8000",
+        "https://127.0.0.1:8000", "https://localhost:8000",
+    }:
+        raise HTTPException(403, "Недопустимый источник запроса")
+    if _drawing_generation_lock.locked():
+        raise HTTPException(409, "GPT уже создаёт рисунки")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Некорректный JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Некорректный запрос")
+    transcript = str(payload.get("srt_text") or "")
+    transcript_job_id = str(payload.get("transcript_job_id") or "")
+    project_id = str(payload.get("project_id") or "")
+    if transcript_job_id:
+        source_job = jobs.get(transcript_job_id) or {}
+        if source_job.get("status") == "done" and isinstance(source_job.get("result"), list):
+            transcript = montage_engine.build_words_srt(source_job["result"])
+    elif project_id:
+        async with PROJECTS_LOCK:
+            project = dict(PROJECTS.get(project_id) or {})
+        source_job = jobs.get(str(project.get("transcript_job_id") or "")) or {}
+        if source_job.get("status") == "done" and isinstance(source_job.get("result"), list):
+            transcript = montage_engine.build_words_srt(source_job["result"])
+    if not transcript.strip():
+        raise HTTPException(400, "Сначала выберите транскрибацию или загрузите SRT")
+    if len(transcript) > 200_000:
+        raise HTTPException(400, "Транскрипция слишком большая")
+    try:
+        async with _drawing_generation_lock:
+            drawings = await asyncio.to_thread(drawing_generator.generate_drawings, transcript)
+    except Exception as exc:
+        raise HTTPException(502, f"Не удалось получить рисунки от GPT: {exc}")
+    return {"drawings": drawings}
+
+
 @app.post("/api/montage/render")
 async def start_montage(
     video: Optional[UploadFile] = File(None),
     srt: Optional[UploadFile] = File(None),
+    overlay_files: list[UploadFile] = File(default=[]),
     transcript_job_id: Optional[str] = Form(None),
     project_id: Optional[str] = Form(None),
     subtitle_mode: str = Form("words"),
@@ -1332,14 +1681,16 @@ async def start_montage(
     face_tracking: bool = Form(False),
     autozoom: bool = Form(False),
     mirror_horizontal: bool = Form(False),
+    blur_banned_words: bool = Form(False),
     subtitles: bool = Form(True),
     bigpickle: bool = Form(True),
     edge_mode: str = Form("scale"),
-    animation_id: str = Form("Running_Cat_f1718808"),
+    animation_id: str = Form(""),
     animation_start: float = Form(0.0),
     animation_offset_x: int = Form(0),
     animation_item_size: int = Form(72),
     animation_bar: bool = Form(False),
+    overlays_json: Optional[str] = Form(None),
     propose_cover: bool = Form(False),
     cover_title: str = Form(""),
     zoom_timeline_json: Optional[str] = Form(None),
@@ -1388,6 +1739,14 @@ async def start_montage(
     if srt is not None and srt.filename:
         srt_text = (await srt.read()).decode("utf-8", errors="replace")
 
+    if not srt_text and transcript_job_id:
+        source_job = jobs.get(transcript_job_id)
+        if not source_job or source_job.get("status") != "done" \
+                or not isinstance(source_job.get("result"), list):
+            raise HTTPException(400, "Сохранённая транскрибация недоступна")
+        src_job_id = transcript_job_id
+        srt_text = montage_engine.build_words_srt(source_job["result"])
+
     if not srt_text:
         raise HTTPException(400, "Нет текста для субтитров (загрузите SRT или выберите проект с транскрибацией)")
     cover_title = cover_title.strip()
@@ -1400,6 +1759,107 @@ async def start_montage(
             zoom_override = json.loads(zoom_timeline_json)
         except json.JSONDecodeError:
             raise HTTPException(400, "zoom_timeline_json должен быть валидным JSON")
+
+    overlays: list[dict] = []
+    if overlays_json and overlays_json.strip():
+        try:
+            raw_overlays = json.loads(overlays_json)
+        except json.JSONDecodeError:
+            raise HTTPException(400, "overlays_json должен быть валидным JSON")
+        if not isinstance(raw_overlays, list):
+            raise HTTPException(400, "overlays_json должен быть списком")
+        if len(raw_overlays) > 20:
+            raise HTTPException(400, "Можно добавить не более 20 наложений")
+        saved_overlay_paths: dict[int, Path] = {}
+        overlay_uploads = overlay_files or []
+        total_overlay_bytes = 0
+        for index, raw in enumerate(raw_overlays):
+            if not isinstance(raw, dict):
+                raise HTTPException(400, f"Наложение {index + 1} имеет неверный формат")
+            try:
+                start = float(raw.get("start") or 0.0)
+                end = float(raw.get("end"))
+                x = float(raw.get("x", 0.5))
+                y = float(raw.get("y", 0.5))
+                size = max(20, min(1200, int(raw.get("size") or 180)))
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"Параметры наложения {index + 1} некорректны")
+            if not all(math.isfinite(value) for value in (start, end, x, y)):
+                raise HTTPException(400, f"Параметры наложения {index + 1} должны быть конечными числами")
+            start = max(0.0, min(86399.95, start))
+            end = max(0.0, min(86400.0, end))
+            x = max(0.0, min(1.0, x))
+            y = max(0.0, min(1.0, y))
+            if end - start < 0.05:
+                raise HTTPException(400, f"Длительность наложения {index + 1} должна быть не меньше 0.05 сек")
+            overlay = {
+                "uid": str(raw.get("uid") or f"overlay-{index + 1}")[:80],
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "x": round(x, 4),
+                "y": round(y, 4),
+                "size": size,
+                "z_index": index,
+            }
+            overlay_kind = str(raw.get("kind") or "")
+            if overlay_kind == "image":
+                try:
+                    file_index = int(raw.get("file_index"))
+                    upload = overlay_uploads[file_index]
+                except (TypeError, ValueError, IndexError):
+                    raise HTTPException(400, f"Файл наложения {index + 1} не найден")
+                if file_index not in saved_overlay_paths:
+                    content = await upload.read()
+                    total_overlay_bytes += len(content)
+                    if not content or len(content) > 20 * 1024 * 1024 or total_overlay_bytes > 100 * 1024 * 1024:
+                        raise HTTPException(400, "Изображения наложений слишком большие")
+                    try:
+                        from PIL import Image
+                        with Image.open(io.BytesIO(content)) as image:
+                            image.verify()
+                        with Image.open(io.BytesIO(content)) as image:
+                            width, height = image.size
+                            image_format = str(image.format or "").upper()
+                    except Exception:
+                        raise HTTPException(400, f"Наложение {index + 1} не является корректным изображением")
+                    if image_format not in {"PNG", "JPEG", "WEBP"} or width < 1 or height < 1 or width * height > 50_000_000:
+                        raise HTTPException(400, f"Формат или размер наложения {index + 1} не поддерживается")
+                    extension = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}[image_format]
+                    overlay_dir = work_dir / "overlays"
+                    overlay_dir.mkdir(exist_ok=True)
+                    overlay_path = overlay_dir / f"overlay_{file_index + 1:02d}{extension}"
+                    overlay_path.write_bytes(content)
+                    saved_overlay_paths[file_index] = overlay_path
+                overlay.update({
+                    "kind": "image",
+                    "image_path": str(saved_overlay_paths[file_index].resolve()),
+                    "name": Path(upload.filename or f"Наложение {index + 1}").name[:120],
+                })
+            elif overlay_kind == "drawing":
+                try:
+                    validated = drawing_generator.validate_drawing_overlay(raw, index)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise HTTPException(400, f"Рисунок {index + 1} некорректен: {exc}")
+                overlay.update({
+                    "kind": "drawing",
+                    "name": validated["name"],
+                    "trigger_text": validated["trigger_text"],
+                    "draw_speed": validated["draw_speed"],
+                    "drawing": validated["drawing"],
+                })
+            else:
+                overlay_animation_id = str(raw.get("animation_id") or "")
+                if Path(overlay_animation_id).name != overlay_animation_id or not (
+                    montage_engine.ANIMATIONS_DIR / overlay_animation_id / "manifest.json"
+                ).is_file():
+                    raise HTTPException(400, f"Источник наложения {index + 1} не найден")
+                overlay.update({"kind": "animation", "animation_id": overlay_animation_id})
+            overlays.append(overlay)
+    if animation_id:
+        if Path(animation_id).name != animation_id or not (
+            montage_engine.ANIMATIONS_DIR / animation_id / "manifest.json"
+        ).is_file():
+            raise HTTPException(400, "Выбранная анимация не найдена")
 
     jobs[job_id] = {
         "id": job_id,
@@ -1435,9 +1895,11 @@ async def start_montage(
         "face_tracking": face_tracking,
         "autozoom": autozoom,
         "mirror_horizontal": mirror_horizontal,
+        "blur_banned_words": blur_banned_words,
         "subtitles": subtitles,
         "bigpickle": bigpickle,
         "edge_mode": edge_mode,
+        "overlays": overlays,
         "animation": {
             "enabled": bool(animation_id),
             "id": animation_id,

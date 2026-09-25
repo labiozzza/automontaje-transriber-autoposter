@@ -16,6 +16,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
 
+from .audio_censor import build_volume_filter, find_mute_intervals, needs_word_alignment
 from .secrets_env import load_secrets_env, get_software_defaults
 
 MONAGE_DIR = Path(__file__).resolve().parent
@@ -122,6 +123,7 @@ def run_cmd(
     log_path: Path,
     line_cb: Callable[[str], None] | None = None,
     timeout: int = 3600,
+    env: dict[str, str] | None = None,
 ) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8", errors="replace") as log:
@@ -133,6 +135,7 @@ def run_cmd(
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
         )
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -142,6 +145,7 @@ def run_cmd(
                     line_cb(line)
                 except Exception:
                     pass
+        proc.stdout.close()
         return proc.wait()
 
 
@@ -167,6 +171,20 @@ def build_words_srt(segments: list[dict[str, Any]]) -> str:
             continue
         lines.extend([str(i), f"{fmt(start)} --> {fmt(end)}", text, ""])
     return "\n".join(lines).strip() + "\n"
+
+
+def build_word_timing_srt(segments: list[dict[str, Any]]) -> str:
+    timed_words = [
+        {
+            "start": word.get("start"),
+            "end": word.get("end"),
+            "text": word.get("word") or word.get("text"),
+        }
+        for segment in segments
+        for word in (segment.get("word_timestamps") or segment.get("words") or [])
+        if isinstance(word, dict)
+    ]
+    return build_words_srt(timed_words) if timed_words else ""
 
 
 def format_timecode(t: float) -> str:
@@ -334,6 +352,7 @@ def render_montage(
     subtitle_mode = str(options.get("subtitle_mode") or "words")
     subtitle_position = str(options.get("subtitle_position") or "custom")
     animation_cfg = options.get("animation") or {}
+    overlays_cfg = options.get("overlays") if isinstance(options.get("overlays"), list) else []
     zoom_override = options.get("zoom_timeline_override")
     do_face_track = bool(options.get("face_tracking", False))
     do_zoom = bool(options.get("autozoom", False))
@@ -354,6 +373,7 @@ def render_montage(
         [PYTHON, "-u", str(MONAGE_DIR / "generate_configs_from_transcript_srt.py"), str(transcript)],
         cwd=workdir, log_path=workdir / "configs.log", timeout=900,
         line_cb=lambda line: progress_cb(8, "configs", line.strip()[:120]),
+        env=env,
     )
     if code != 0:
         raise RuntimeError("Не удалось сгенерировать конфиги зума/субтитров")
@@ -489,7 +509,7 @@ def render_montage(
         ]
         if font:
             cmd += ["--font", str(font)]
-        subtitle_end = 89 if bool(animation_cfg.get("enabled")) else 99
+        subtitle_end = 89 if overlays_cfg or bool(animation_cfg.get("enabled")) else 99
         def sub_line(line: str) -> None:
             if "progress:" in line or "frame=" in line:
                 try:
@@ -512,24 +532,94 @@ def render_montage(
         raise RuntimeError("Не создан итоговый файл")
     final_mp4 = Path(final_mp4)
 
-    # ---- Stage: timeline animation (optional) ----
+    # Overlay compositing deliberately runs after mirroring. Only the source video
+    # is flipped; overlay artwork always keeps its original orientation.
+    used_overlays: list[dict[str, Any]] = []
+    for index, raw in enumerate(overlays_cfg[:20]):
+        if not isinstance(raw, dict):
+            continue
+        start = max(0.0, float(raw.get("start") or 0.0))
+        end = max(start + 0.05, float(raw.get("end") if raw.get("end") is not None else 86400.0))
+        overlay = {
+            "uid": str(raw.get("uid") or f"overlay-{index + 1}"),
+            "start": start,
+            "end": end,
+            "x": max(0.0, min(1.0, float(raw.get("x") if raw.get("x") is not None else 0.5))),
+            "y": max(0.0, min(1.0, float(raw.get("y") if raw.get("y") is not None else 0.5))),
+            "size": max(20, min(1200, int(raw.get("size") or 180))),
+            "z_index": int(raw.get("z_index") if raw.get("z_index") is not None else index),
+            "motion": "static",
+            "offset_x": 0,
+        }
+        overlay_kind = str(raw.get("kind") or "")
+        if overlay_kind == "image":
+            image_path = Path(str(raw.get("image_path") or "")).resolve()
+            try:
+                image_path.relative_to(workdir.resolve())
+            except ValueError:
+                raise RuntimeError("Файл наложения находится вне рабочей директории")
+            if not image_path.is_file():
+                raise RuntimeError(f"Изображение наложения не найдено: {image_path.name}")
+            overlay.update({
+                "kind": "image",
+                "image_path": str(image_path),
+                "name": str(raw.get("name") or image_path.name),
+            })
+        elif overlay_kind == "drawing":
+            drawing = raw.get("drawing")
+            if not isinstance(drawing, dict) or not isinstance(drawing.get("paths"), list):
+                raise RuntimeError("Данные рисунка повреждены")
+            overlay.update({
+                "kind": "drawing",
+                "name": str(raw.get("name") or f"Рисунок {index + 1}"),
+                "trigger_text": str(raw.get("trigger_text") or ""),
+                "draw_speed": max(10.0, min(3000.0, float(raw.get("draw_speed") or 350))),
+                "drawing": drawing,
+            })
+        else:
+            animation_id = str(raw.get("animation_id") or raw.get("id") or "")
+            if Path(animation_id).name != animation_id or not (ANIMATIONS_DIR / animation_id / "manifest.json").exists():
+                raise RuntimeError(f"Анимация {animation_id} не найдена в {ANIMATIONS_DIR}")
+            overlay.update({"kind": "animation", "animation_id": animation_id})
+        used_overlays.append(overlay)
+
     used_animation: dict[str, Any] | None = None
+    render_layers = list(used_overlays)
     if bool(animation_cfg.get("enabled")) and str(animation_cfg.get("id") or ""):
         animation_id = str(animation_cfg.get("id"))
-        if not (ANIMATIONS_DIR / animation_id / "manifest.json").exists():
+        if Path(animation_id).name != animation_id or not (ANIMATIONS_DIR / animation_id / "manifest.json").exists():
             raise RuntimeError(f"Анимация {animation_id} не найдена в {ANIMATIONS_DIR}")
-        anim_out = workdir / "with_animation.mp4"
-        anim_start = max(0.0, float(animation_cfg.get("start") or 0.0))
-        progress_cb(90, "animation", f"Анимация таймлайна ({animation_id})...")
+        animation_start = max(0.0, float(animation_cfg.get("start") or 0.0))
+        used_animation = {
+            "id": animation_id,
+            "start": animation_start,
+            "offset_x": int(animation_cfg.get("offset_x") or 0),
+            "item_size": max(20, min(1200, int(animation_cfg.get("item_size") or 72))),
+        }
+        render_layers.append({
+            "uid": "timeline-animation",
+            "animation_id": animation_id,
+            "start": animation_start,
+            "end": 86400.0,
+            "size": used_animation["item_size"],
+            "z_index": -1,
+            "motion": "progress",
+            "offset_x": used_animation["offset_x"],
+        })
+
+    if render_layers:
+        anim_out = workdir / "with_visual_layers.mp4"
+        overlay_config = workdir / "overlay_timeline_config.json"
+        overlay_config.write_text(json.dumps({
+            "video": str(final_mp4.resolve()),
+            "output": str(anim_out.resolve()),
+            "animations_dir": str(ANIMATIONS_DIR.resolve()),
+            "overlays": render_layers,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        progress_cb(90, "animation", f"Рендер визуальных слоёв: {len(render_layers)}...")
         cmd = [
             PYTHON, "-u", str(MONAGE_DIR / "apply_timeline_animation.py"),
-            "--video", str(final_mp4), "--output", str(anim_out),
-            "--animations-dir", str(ANIMATIONS_DIR),
-            "--animation", animation_id,
-            "--start", str(anim_start),
-            "--offset-x", str(int(animation_cfg.get("offset_x") or 0)),
-            "--item-size", str(int(animation_cfg.get("item_size") or 72)),
-            "--bar", "0",
+            "--config", str(overlay_config),
         ]
 
         def anim_line(line: str) -> None:
@@ -542,18 +632,35 @@ def render_montage(
                     pass
         code = run_cmd(cmd, cwd=workdir, log_path=workdir / "animation.log", line_cb=anim_line)
         if code != 0:
-            raise RuntimeError("Анимация таймлайна не удалась")
+            raise RuntimeError("Рендер визуальных слоёв не удался")
         final_mp4 = anim_out
-        used_animation = {
-            "id": animation_id,
-            "start": anim_start,
-            "offset_x": int(animation_cfg.get("offset_x") or 0),
-            "item_size": int(animation_cfg.get("item_size") or 72),
-        }
-        progress_cb(99, "animation", "Анимация готова")
+        progress_cb(99, "animation", "Визуальные слои готовы")
 
     if not final_mp4.exists():
         raise RuntimeError("Не создан итоговый файл")
+
+    blur_banned_words = bool(options.get("blur_banned_words", False))
+    censor_srt_text = str(options.get("audio_censor_srt") or srt_text)
+    muted_intervals = find_mute_intervals(censor_srt_text) if blur_banned_words else []
+    if muted_intervals:
+        probe = ffprobe(final_mp4)
+        if any(stream.get("codec_type") == "audio" for stream in probe.get("streams") or []):
+            progress_cb(99, "audio_censor", f"Заглушение нежелательных слов: {len(muted_intervals)}")
+            censored_mp4 = workdir / "censored_audio.mp4"
+            censor_cmd = [
+                shutil.which("ffmpeg") or "ffmpeg", "-y", "-i", str(final_mp4),
+                "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy",
+                "-af", build_volume_filter(muted_intervals),
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(censored_mp4),
+            ]
+            censor_result = subprocess.run(censor_cmd, capture_output=True, timeout=1800)
+            if censor_result.returncode != 0 or not censored_mp4.is_file():
+                detail = censor_result.stderr.decode("utf-8", errors="replace")[-400:]
+                raise RuntimeError(f"Не удалось заглушить нежелательные слова: {detail}")
+            final_mp4 = censored_mp4
+            log_cb(f"Нежелательные слова заглушены: {len(muted_intervals)} интервалов")
+        else:
+            muted_intervals = []
 
     delivery_mp4 = workdir / "final.mp4"
     delivery_cmd = [
@@ -598,6 +705,11 @@ def render_montage(
         ]
     except Exception:
         pass
+    if used_overlays:
+        timeline_data["overlays"] = [
+            {key: value for key, value in overlay.items() if key != "image_path"}
+            for overlay in used_overlays
+        ]
     if used_animation:
         timeline_data["animation"] = used_animation
 
@@ -611,6 +723,8 @@ def render_montage(
         "mirror_horizontal": do_mirror,
         "subtitles": do_subtitles,
         "bigpickle": use_bigpickle,
+        "blur_banned_words": blur_banned_words,
+        "blurred_word_intervals": len(muted_intervals),
         "animations": list(animation_ids()),
         "timeline": timeline_data,
     }
@@ -699,6 +813,9 @@ def _publish_targets(
         result_key = str(target.get("id") or kind)
         target_source = mirrored_source_video if bool(target.get("mirrored")) else source_video
         if target_source is None or not Path(target_source).exists():
+            preparation_error = str(target.get("preparation_error") or "").strip()
+            if preparation_error:
+                raise RuntimeError(f"Не удалось подготовить видео для цели {label}: {preparation_error}")
             raise RuntimeError(f"Не подготовлена видео-версия для цели: {label}")
 
         def sub_progress(p: float, detail: str) -> None:
