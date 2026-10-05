@@ -1071,8 +1071,14 @@ select option { background: var(--surface2); }
           <div class="drawing-replica-list" id="drawingReplicaList"></div>
         </div>
         <div class="drawing-actions">
-          <button class="btn" type="button" id="generateDrawingsBtn" onclick="generateMontageDrawings()">BigPickle: создать схемы</button>
-          <span class="toggle-desc" id="drawingGenerationStatus">Отметьте фрагменты или добавьте свои реплики для схем</span>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="drawingGenMode" style="background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:12px">
+              <option value="auto">Авто — 2–3 смысловых схемы по всей транскрипции</option>
+              <option value="manual">Ручной — по выбранным фрагментам</option>
+            </select>
+            <button class="btn btn-primary" type="button" id="generateDrawingsBtn" onclick="generateMontageDrawings()">Создать схемы</button>
+          </div>
+          <span class="toggle-desc" id="drawingGenerationStatus">Выберите режим и запустите генерацию: авто-подбор по транскрипции или ручной выбор фрагментов</span>
         </div>
         <div class="drawing-generation-progress" id="drawingGenerationProgress">
           <div class="drawing-generation-progress-track"><div class="drawing-generation-progress-bar" id="drawingGenerationProgressBar"></div></div>
@@ -2649,14 +2655,19 @@ async function generateMontageDrawings() {
     montageError('Сначала выберите проект, транскрибацию или SRT');
     return;
   }
+  const modeEl = document.getElementById('drawingGenMode');
+  payload.mode = modeEl && modeEl.value ? modeEl.value : 'manual';
   button.disabled = true;
-  status.textContent = 'BigPickle создаёт схемы только для выбранных фрагментов...';
-  let progress = 8;
-  updateDrawingGenerationProgress(progress, 'Подготовка полной транскрипции');
+  status.textContent = 'BigPickle анализирует транскрипцию и подбирает смысловые моменты...';
+  let progress = 5;
+  updateDrawingGenerationProgress(progress, 'Анализ транскрипции');
   clearInterval(drawingProgressTimer);
   drawingProgressTimer = setInterval(() => {
-    progress = Math.min(92, progress + Math.max(.5, (92 - progress) * .035));
-    updateDrawingGenerationProgress(progress, progress < 22 ? 'Подготовка контекста' : 'BigPickle строит схемы');
+    if (progress < 30) progress = Math.min(30, progress + 1.5);
+    else if (progress < 60) progress = Math.min(60, progress + 0.9);
+    else progress = Math.min(92, progress + 0.4);
+    const label = progress < 25 ? 'Анализ транскрипции' : progress < 55 ? 'Подбор смысловых моментов' : 'Создание схем';
+    updateDrawingGenerationProgress(progress, label);
   }, 700);
   try {
     const response = await fetch('/api/montage/drawings/generate', {
@@ -2664,15 +2675,15 @@ async function generateMontageDrawings() {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
-    updateDrawingGenerationProgress(100, 'Схемы готовы');
+    updateDrawingGenerationProgress(100, 'Готово');
     proposalReviseText = [];
     proposalRevising.clear();
     pendingRevisionHistory.clear();
     pendingDrawings = data.drawings || [];
     renderDrawingProposals();
-    status.textContent = `BigPickle создал схем: ${pendingDrawings.length}. Добавьте нужные на таймлайн.`;
+    status.textContent = `Готово: ${pendingDrawings.length} ${pendingDrawings.length === 1 ? 'схема' : pendingDrawings.length < 5 ? 'схемы' : 'схем'}. Проверьте предложения перед добавлением на таймлайн.`;
   } catch (error) {
-    updateDrawingGenerationProgress(progress, 'Ошибка генерации');
+    updateDrawingGenerationProgress(100, 'Ошибка генерации');
     status.textContent = `Ошибка BigPickle: ${error.message}`;
   } finally {
     clearInterval(drawingProgressTimer);

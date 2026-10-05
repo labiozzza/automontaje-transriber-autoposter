@@ -312,9 +312,94 @@ def generate_drawings(transcript: str, selected_fragments: list[dict[str, Any]])
             used_targets.add(target_id)
         except (TypeError, ValueError, OverflowError):
             continue
-    if not drawings:
-        raise ValueError("BigPickle не создал пригодных рисунков для выбранных фрагментов")
     return drawings
+
+def generate_smart_drawings(transcript: str, segments: list[dict[str, Any]], max_drawings: int = 3) -> list[dict[str, Any]]:
+    transcript = transcript.strip()
+    if not transcript:
+        raise ValueError("Транскрипция пуста")
+    phrases = _segments_to_phrases(segments)
+    context_phrases = phrases[:40]
+    prompt = (
+        "Ты — редактор схем для вертикального ролика. Твоя задача: выбрать 2–3 СМЫСЛОВЫХ момента в транскрипции "
+        "и предложить простые объясняющие схемы (drawing) для каждого.\n"
+        "Критерии: важный переход/сравнение/процесс/причина-следствие, моменты равномерно распределены по ролику, "
+        "не предлагай одно слово, бери законченную мысль. Максимум 3 схемы.\n"
+        "Рисуй в координатах 0..1000, 6-20 путей, 40-250 точек, простые формы, стрелки по делу. "
+        "Для графиков рисуй ТОЛЬКО данные (оси нарисует система). Человек — аккуратный стикмен, без реалистичной анатомии.\n"
+        "Верни СТРОГО JSON без markdown:\n"
+        '{"suggestions":[{"text":"фраза","start":0.0,"end":2.5,"name":"название схемы",'
+        '"rationale":"почему","drawing_type":"process","drawing":{"width":1000,"height":1000,'
+        '"paths":[{"points":[[100,200],[200,150]],"stroke":"#FFFFFF","stroke_width":10}]}]}\n\n'
+        "ФРАЗЫ:\n" + json.dumps(context_phrases, ensure_ascii=False) + "\n\nТРАНСКРИПЦИЯ (контекст):\n" + transcript[:20000]
+    )
+    response = ask_json(prompt, model="opencode/big-pickle")
+    suggestions = response.get("suggestions")
+    if not isinstance(suggestions, list):
+        raise ValueError("BigPickle не вернул предложения")
+    drawings: list[dict[str, Any]] = []
+    for idx, s in enumerate(suggestions[:max_drawings]):
+        if not isinstance(s, dict):
+            continue
+        text = str(s.get("text") or "").strip()[:500]
+        if not text:
+            continue
+        try:
+            start = float(s.get("start") or 0)
+            end = float(s.get("end") or start + 0.8)
+        except Exception:
+            continue
+        d = s.get("drawing") or {}
+        viz = s.get("viz")
+        name = str(s.get("name") or "Схема")
+        overlay = {
+            "name": name,
+            "start": round(max(0, start), 3),
+            "end": round(max(start + 0.1, end), 3),
+            "x": 0.5, "y": 0.35, "size": 360, "draw_speed": 900,
+            "trigger_text": text,
+        }
+        if viz and isinstance(viz, dict):
+            overlay["viz"] = viz
+        if not isinstance(d, dict):
+            d = {"width": 1000, "height": 1000, "paths": [{"points": [[100, 500], [900, 500]], "stroke": "#FFFFFF", "stroke_width": 10}]}
+        overlay["drawing"] = d
+        try:
+            validated = validate_drawing_overlay(overlay, idx)
+        except Exception:
+            continue
+        drawings.append(validated)
+    return drawings
+
+
+def _segments_to_phrases(segments: list[dict[str, Any]], max_segments: int = 200) -> list[dict[str, Any]]:
+    phrases: list[dict[str, Any]] = []
+    current_text = ""
+    current_start = 0.0
+    current_end = 0.0
+    count = 0
+    for seg in segments[:max_segments]:
+        try:
+            s = float(seg.get("start") or 0)
+            e = float(seg.get("end") or s)
+        except Exception:
+            continue
+        t = str(seg.get("text") or "").strip()
+        if not t:
+            continue
+        if not current_text:
+            current_text, current_start, current_end = t, s, e
+            continue
+        if t.endswith(('.', '!', '?', '…')) or len(current_text) > 120:
+            phrases.append({"text": current_text, "start": current_start, "end": current_end})
+            current_text, current_start, current_end = t, s, e
+        else:
+            current_text = (current_text + " " + t).strip()
+            current_end = max(current_end, e)
+        count += 1
+    if current_text:
+        phrases.append({"text": current_text, "start": current_start, "end": current_end})
+    return phrases[:60]
 
 
 def revise_drawing(overlay: dict[str, Any], instruction: str, index: int = 0) -> dict[str, Any]:

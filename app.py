@@ -922,6 +922,29 @@ from montage import cover_generator
 from montage import drawing_generator
 
 _drawing_generation_lock = asyncio.Lock()
+_drawing_generation_jobs: dict[str, dict[str, Any]] = {}
+
+
+def _save_drawing_job(job_id: str) -> None:
+    task = _drawing_generation_jobs.get(job_id)
+    if not task:
+        return
+    path = MONTAGE_WORK / job_id / "drawing_generation.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = dict(task)
+    data["updated_at"] = datetime.utcnow().isoformat()
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+from typing import Any, Optional
+...
+def _load_drawing_job(job_id: str) -> Optional[dict[str, Any]]:
+    path = MONTAGE_WORK / job_id / "drawing_generation.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 app.mount("/animation-assets", StaticFiles(directory=str(montage_engine.ANIMATIONS_DIR)), name="animation-assets")
 app.mount("/font-assets", StaticFiles(directory=str(montage_engine.FONTS_DIR)), name="font-assets")
@@ -1650,10 +1673,9 @@ async def generate_montage_drawings(request: Request):
         raise HTTPException(400, "Некорректный запрос")
     transcript = str(payload.get("srt_text") or "")
     requested_fragments = payload.get("selected_fragments")
-    if not isinstance(requested_fragments, list) or not requested_fragments:
-        raise HTTPException(400, "Добавьте хотя бы одно задание для схемы")
-    if len(requested_fragments) > 12:
-        raise HTTPException(400, "Можно подготовить не более 12 заданий для схем")
+    mode = str(payload.get("mode") or "manual")
+    if mode not in ("manual", "auto"):
+        mode = "manual"
     source_segments: list[dict[str, Any]] = []
     transcript_job_id = str(payload.get("transcript_job_id") or "")
     project_id = str(payload.get("project_id") or "")
@@ -1679,46 +1701,91 @@ async def generate_montage_drawings(request: Request):
             duration_end = max(duration_end, float(item.get("end") or 0))
         except (TypeError, ValueError):
             pass
-    selected_fragments = []
-    used_targets: set[str] = set()
-    for position, item in enumerate(requested_fragments):
-        if not isinstance(item, dict):
-            continue
+    source_segments: list[dict[str, Any]] = []
+    transcript_job_id = str(payload.get("transcript_job_id") or "")
+    project_id = str(payload.get("project_id") or "")
+    if transcript_job_id:
+        source_job = jobs.get(transcript_job_id) or {}
+        if source_job.get("status") == "done" and isinstance(source_job.get("result"), list):
+            source_segments = source_job["result"]
+            transcript = montage_engine.build_words_srt(source_segments)
+    elif project_id:
+        async with PROJECTS_LOCK:
+            project = dict(PROJECTS.get(project_id) or {})
+        source_job = jobs.get(str(project.get("transcript_job_id") or "")) or {}
+        if source_job.get("status") == "done" and isinstance(source_job.get("result"), list):
+            source_segments = source_job["result"]
+            transcript = montage_engine.build_words_srt(source_segments)
+    if not transcript.strip():
+        raise HTTPException(400, "Сначала выберите транскрибацию или загрузите SRT")
+    if len(transcript) > 200_000:
+        raise HTTPException(400, "Транскрипция слишком большая")
+    duration_end = 0.0
+    for item in source_segments:
         try:
-            segment_index = int(item.get("segment_index"))
+            duration_end = max(duration_end, float(item.get("end") or 0))
         except (TypeError, ValueError):
-            segment_index = -1
-        if source_segments and segment_index != -1 and not 0 <= segment_index < len(source_segments):
-            raise HTTPException(400, "Выбран неизвестный фрагмент транскрипции")
-        if source_segments and 0 <= segment_index < len(source_segments):
-            segment = source_segments[segment_index]
-            target_id = str(segment_index)
-            base_start = float(segment.get("start") or 0)
-            base_end = float(segment.get("end") or base_start + 1)
-            base_text = str(segment.get("text") or "")
-        else:
-            target_id = str(item.get("target_id") or f"manual-{position}")
-            base_start = 0.0
-            base_end = 1.0
-            base_text = ""
-        text = str(item.get("text") if item.get("text") is not None else base_text).strip()[:500]
-        start = _drawing_time(item.get("start"), base_start)
-        end = _drawing_time(item.get("end"), base_end)
-        if target_id in used_targets:
-            continue
-        if not text:
-            raise HTTPException(400, "У каждого задания для схемы должен быть текст")
-        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start + 0.049:
-            raise HTTPException(400, f"Некорректное время показа для «{text[:40]}»")
-        if duration_end and end > duration_end + 0.05:
-            raise HTTPException(400, f"Конец схемы «{text[:40]}» выходит за длительность ролика")
-        selected_fragments.append({
-            "target_id": target_id,
-            "start": round(start, 3),
-            "end": round(end, 3),
-            "text": text,
-        })
-        used_targets.add(target_id)
+            pass
+    if mode == "manual":
+        if not isinstance(requested_fragments, list) or not requested_fragments:
+            raise HTTPException(400, "Добавьте хотя бы одно задание для схемы")
+        if len(requested_fragments) > 12:
+            raise HTTPException(400, "Можно подготовить не более 12 заданий для схем")
+    selected_fragments = []
+    if mode == "manual":
+        used_targets: set[str] = set()
+        for position, item in enumerate(requested_fragments):
+            if not isinstance(item, dict):
+                continue
+            try:
+                segment_index = int(item.get("segment_index"))
+            except (TypeError, ValueError):
+                segment_index = -1
+            if source_segments and segment_index != -1 and not 0 <= segment_index < len(source_segments):
+                raise HTTPException(400, "Выбран неизвестный фрагмент транскрипции")
+            if source_segments and 0 <= segment_index < len(source_segments):
+                segment = source_segments[segment_index]
+                target_id = str(segment_index)
+                base_start = float(segment.get("start") or 0)
+                base_end = float(segment.get("end") or base_start + 1)
+                base_text = str(segment.get("text") or "")
+            else:
+                target_id = str(item.get("target_id") or f"manual-{position}")
+                base_start = 0.0
+                base_end = 1.0
+                base_text = ""
+            text = str(item.get("text") if item.get("text") is not None else base_text).strip()[:500]
+            start = _drawing_time(item.get("start"), base_start)
+            end = _drawing_time(item.get("end"), base_end)
+            if target_id in used_targets:
+                continue
+            if not text:
+                raise HTTPException(400, "У каждого задания для схемы должен быть текст")
+            if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start + 0.049:
+                raise HTTPException(400, f"Некорректное время показа для «{text[:40]}»")
+            if duration_end and end > duration_end + 0.05:
+                raise HTTPException(400, f"Конец схемы «{text[:40]}» выходит за длительность ролика")
+            selected_fragments.append({
+                "target_id": target_id,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": text,
+            })
+            used_targets.add(target_id)
+    else:
+        selected_fragments = []
+    if mode == "auto":
+        try:
+            async with _drawing_generation_lock:
+                drawings = await asyncio.to_thread(
+                    drawing_generator.generate_smart_drawings,
+                    transcript,
+                    source_segments or [],
+                    3,
+                )
+        except Exception as exc:
+            raise HTTPException(502, f"Не удалось получить рисунки от BigPickle: {exc}")
+        return {"drawings": drawings}
     if not selected_fragments:
         raise HTTPException(400, "Не осталось пригодных заданий для схем")
     try:
