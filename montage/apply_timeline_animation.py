@@ -9,7 +9,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 
 def ffprobe_meta(video: Path) -> dict:
@@ -98,7 +98,75 @@ def _visible_points(points: list[list[float]], length: float) -> list[list[float
     return visible
 
 
-def render_drawing(drawing: dict, size: int, visible_length: float) -> Image.Image:
+def _ease_hand_motion(progress: float) -> float:
+    progress = min(1.0, max(0.0, progress))
+    return progress * progress * (3.0 - 2.0 * progress)
+
+
+_CHART_AXIS_COLOR = (255, 255, 255, 235)
+_CHART_LABEL_COLOR = (255, 255, 255, 255)
+
+
+def _chart_font(scale: float) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    candidates = [
+        Path(__file__).resolve().parent / "fonts" / "Comfortaa.ttf",
+        Path("montage/fonts/Comfortaa.ttf"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            try:
+                return ImageFont.truetype(str(candidate), max(10, int(round(44 * scale))))
+            except OSError:
+                break
+    return ImageFont.load_default()
+
+
+def _arrowhead(painter: ImageDraw.ImageDraw, tip: tuple[int, int], direction_deg: float,
+               base_len: int, half_width: int, fill: tuple[int, int, int, int]) -> None:
+    rad = math.radians(direction_deg)
+    base = (tip[0] - base_len * math.cos(rad), tip[1] - base_len * math.sin(rad))
+    perp = math.radians(direction_deg + 90.0)
+    left = (base[0] + half_width * math.cos(perp), base[1] + half_width * math.sin(perp))
+    right = (base[0] - half_width * math.cos(perp), base[1] - half_width * math.sin(perp))
+    painter.polygon([tip, left, right], fill=fill)
+
+
+def _draw_chart_widgets(painter: ImageDraw.ImageDraw, canvas: Image.Image,
+                        scale: float, viz: dict) -> None:
+    x_begin, x_end, y_level = 120, 880, 920
+    y_top = 80
+    line_width = max(1, int(round(3 * scale)))
+    arrow = max(8, int(round(26 * scale)))
+    px = lambda dx, dy: (int(round(dx * scale)), int(round(dy * scale)))  # noqa: E731
+
+    painter.line([px(x_begin, y_level), px(x_end, y_level)], fill=_CHART_AXIS_COLOR, width=line_width)
+    _arrowhead(painter, px(x_end, y_level), 0.0, arrow, max(1, int(round(arrow * 0.6))), _CHART_AXIS_COLOR)
+    painter.line([px(x_begin, y_top), px(x_begin, y_level)], fill=_CHART_AXIS_COLOR, width=line_width)
+    _arrowhead(painter, px(x_begin, y_top), 90.0, arrow, max(1, int(round(arrow * 0.6))), _CHART_AXIS_COLOR)
+
+    axes = viz.get("axes") if isinstance(viz.get("axes"), dict) else {}
+    x_label = str(axes.get("x") or "").strip()
+    y_label = str(axes.get("y") or "").strip()
+    font = _chart_font(scale)
+
+    if x_label:
+        painter.text(px(500, 982), x_label, font=font, fill=_CHART_LABEL_COLOR, anchor="mm")
+    if y_label:
+        try:
+            tmp = Image.new("RGBA", (60, 60), (0, 0, 0, 0))
+            temp_draw = ImageDraw.Draw(tmp)
+            bbox = temp_draw.textbbox((0, 0), y_label, font=font)
+            tmp = tmp.crop((0, 0, max(1, bbox[2] - bbox[0]), max(1, bbox[3] - bbox[1])))
+            temp_draw = ImageDraw.Draw(tmp)
+            temp_draw.text((bbox[0], bbox[1]), y_label, font=font, fill=_CHART_LABEL_COLOR, anchor="la")
+            rotated = tmp.rotate(-90, expand=True)
+            dest = (int(round(52 * scale - rotated.width / 2)), int(round(500 * scale - rotated.height / 2)))
+            canvas.alpha_composite(rotated, dest)
+        except OSError:
+            painter.text(px(48, 500), y_label, font=font, fill=_CHART_LABEL_COLOR, anchor="mm")
+
+
+def render_drawing(drawing: dict, size: int, elapsed: float, draw_speed: float = 350.0) -> Image.Image:
     source_width = max(1, int(drawing.get("width") or 1000))
     source_height = max(1, int(drawing.get("height") or 1000))
     scale = size / max(source_width, source_height)
@@ -108,15 +176,22 @@ def render_drawing(drawing: dict, size: int, visible_length: float) -> Image.Ima
         (0, 0, 0, 0),
     )
     painter = ImageDraw.Draw(output)
-    remaining = max(0.0, visible_length)
+    cursor = 0.0
+    elapsed = max(0.0, elapsed)
+    draw_speed = max(1.0, draw_speed)
+    stroke_pause = min(0.1, max(0.0, float(drawing.get("stroke_pause", 0.03))))
     for path in drawing.get("paths") or []:
         points = path.get("points") or []
         full_length = _path_length(points)
-        if full_length <= 0 or remaining <= 0:
+        if full_length <= 0:
             continue
-        shown = _visible_points(points, remaining)
-        complete = remaining >= full_length
-        remaining -= full_length
+        stroke_duration = max(0.04, full_length / draw_speed)
+        progress = _ease_hand_motion((elapsed - cursor) / stroke_duration)
+        cursor += stroke_duration + stroke_pause
+        if progress <= 0:
+            continue
+        shown = _visible_points(points, full_length * progress)
+        complete = progress >= 1.0
         if complete and path.get("closed") and shown:
             shown = [*shown, shown[0]]
         if len(shown) < 2:
@@ -134,6 +209,9 @@ def render_drawing(drawing: dict, size: int, visible_length: float) -> Image.Ima
             width=max(1, int(round(float(path.get("stroke_width") or 8) * scale))),
             joint="curve",
         )
+    viz = drawing.get("viz") if isinstance(drawing.get("viz"), dict) else {}
+    if viz.get("type") == "chart":
+        _draw_chart_widgets(painter, output, scale, viz)
     return output
 
 
@@ -208,7 +286,7 @@ def main() -> None:
                 "uid": str(raw.get("uid") or f"overlay-{index + 1}"),
                 "kind": "drawing",
                 "drawing": drawing,
-                "draw_speed": max(10.0, min(3000.0, float(raw.get("draw_speed") or 350))),
+                "draw_speed": max(10.0, min(50000.0, float(raw.get("draw_speed") or 350))),
                 "size": max(20, int(raw.get("size") or 360)),
                 "start": start,
                 "end": end,
@@ -297,7 +375,8 @@ def main() -> None:
                     img = render_drawing(
                         overlay["drawing"],
                         overlay["size"],
-                        (t - overlay["start"]) * overlay["draw_speed"],
+                        t - overlay["start"],
+                        overlay["draw_speed"],
                     )
                 else:
                     frame_time = t if overlay["motion"] == "progress" else t - overlay["start"]

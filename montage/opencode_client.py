@@ -59,7 +59,8 @@ def ask_json(prompt: str, *, model: str | None = None, timeout: float = 240, ret
         if key in {
             "HOME", "PATH", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM", "USER", "LOGNAME",
             "XDG_CONFIG_HOME", "XDG_DATA_HOME", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
-            "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
+            "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "OPENCODE_CLIENT", "PWD", "OLDPWD",
+            "COMMAND_MODE", "__CFBundleIdentifier",
         }
     }
     error = "GPT не вернул результат"
@@ -83,6 +84,9 @@ def ask_json(prompt: str, *, model: str | None = None, timeout: float = 240, ret
                 )
             if result.returncode != 0:
                 error = f"OpenCode завершился с кодом {result.returncode}"
+                detail = result.stderr.strip()[-500:]
+                if detail:
+                    error += f": {detail}"
             else:
                 raw = result.stdout[:2_000_000]
                 parsed = _json_object(_assistant_text(raw)) or _json_object(raw)

@@ -15,7 +15,7 @@ _loaded = False
 def load_secrets_env() -> None:
     """Load gitignored config/secrets.json into os.environ (without overriding) and
     set defaults needed by vendored instaposter scripts."""
-    global _loaded
+    global _loaded, MEDIA_REPO_DIR
     if _loaded:
         return
     if SECRETS_FILE.exists():
@@ -27,8 +27,14 @@ def load_secrets_env() -> None:
             if value and not os.environ.get(key):
                 os.environ[key] = str(value)
     os.environ.setdefault("GITHUB_REPO_DIR", str(MEDIA_REPO_DIR))
+    MEDIA_REPO_DIR = Path(os.environ["GITHUB_REPO_DIR"])
     os.environ.setdefault("INSTAGRAM_API_VERSION", "v26.0")
     _loaded = True
+
+
+def media_repo_dir() -> Path:
+    load_secrets_env()
+    return MEDIA_REPO_DIR
 
 
 def reload_secrets_env() -> None:

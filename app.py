@@ -2,7 +2,7 @@ import os, json, uuid, asyncio, subprocess, time, re, tempfile, hashlib, urllib.
 import shutil
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 from datetime import datetime
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException, Request
@@ -1620,6 +1620,15 @@ async def download_comfortaa_font():
     return {"font": {"id": target.name, "name": "Comfortaa", "path": str(target)}}
 
 
+def _drawing_time(value: Any, fallback: float) -> float:
+    if value is None or str(value).strip() == "":
+        return float(fallback)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
 @app.post("/api/montage/drawings/generate")
 async def generate_montage_drawings(request: Request):
     client_host = request.client.host if request.client else ""
@@ -1632,7 +1641,7 @@ async def generate_montage_drawings(request: Request):
     }:
         raise HTTPException(403, "Недопустимый источник запроса")
     if _drawing_generation_lock.locked():
-        raise HTTPException(409, "GPT уже создаёт рисунки")
+        raise HTTPException(409, "BigPickle уже создаёт рисунки")
     try:
         payload = await request.json()
     except Exception:
@@ -1640,28 +1649,129 @@ async def generate_montage_drawings(request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(400, "Некорректный запрос")
     transcript = str(payload.get("srt_text") or "")
+    requested_fragments = payload.get("selected_fragments")
+    if not isinstance(requested_fragments, list) or not requested_fragments:
+        raise HTTPException(400, "Добавьте хотя бы одно задание для схемы")
+    if len(requested_fragments) > 12:
+        raise HTTPException(400, "Можно подготовить не более 12 заданий для схем")
+    source_segments: list[dict[str, Any]] = []
     transcript_job_id = str(payload.get("transcript_job_id") or "")
     project_id = str(payload.get("project_id") or "")
     if transcript_job_id:
         source_job = jobs.get(transcript_job_id) or {}
         if source_job.get("status") == "done" and isinstance(source_job.get("result"), list):
-            transcript = montage_engine.build_words_srt(source_job["result"])
+            source_segments = source_job["result"]
+            transcript = montage_engine.build_words_srt(source_segments)
     elif project_id:
         async with PROJECTS_LOCK:
             project = dict(PROJECTS.get(project_id) or {})
         source_job = jobs.get(str(project.get("transcript_job_id") or "")) or {}
         if source_job.get("status") == "done" and isinstance(source_job.get("result"), list):
-            transcript = montage_engine.build_words_srt(source_job["result"])
+            source_segments = source_job["result"]
+            transcript = montage_engine.build_words_srt(source_segments)
     if not transcript.strip():
         raise HTTPException(400, "Сначала выберите транскрибацию или загрузите SRT")
     if len(transcript) > 200_000:
         raise HTTPException(400, "Транскрипция слишком большая")
+    duration_end = 0.0
+    for item in source_segments:
+        try:
+            duration_end = max(duration_end, float(item.get("end") or 0))
+        except (TypeError, ValueError):
+            pass
+    selected_fragments = []
+    used_targets: set[str] = set()
+    for position, item in enumerate(requested_fragments):
+        if not isinstance(item, dict):
+            continue
+        try:
+            segment_index = int(item.get("segment_index"))
+        except (TypeError, ValueError):
+            segment_index = -1
+        if source_segments and segment_index != -1 and not 0 <= segment_index < len(source_segments):
+            raise HTTPException(400, "Выбран неизвестный фрагмент транскрипции")
+        if source_segments and 0 <= segment_index < len(source_segments):
+            segment = source_segments[segment_index]
+            target_id = str(segment_index)
+            base_start = float(segment.get("start") or 0)
+            base_end = float(segment.get("end") or base_start + 1)
+            base_text = str(segment.get("text") or "")
+        else:
+            target_id = str(item.get("target_id") or f"manual-{position}")
+            base_start = 0.0
+            base_end = 1.0
+            base_text = ""
+        text = str(item.get("text") if item.get("text") is not None else base_text).strip()[:500]
+        start = _drawing_time(item.get("start"), base_start)
+        end = _drawing_time(item.get("end"), base_end)
+        if target_id in used_targets:
+            continue
+        if not text:
+            raise HTTPException(400, "У каждого задания для схемы должен быть текст")
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start + 0.049:
+            raise HTTPException(400, f"Некорректное время показа для «{text[:40]}»")
+        if duration_end and end > duration_end + 0.05:
+            raise HTTPException(400, f"Конец схемы «{text[:40]}» выходит за длительность ролика")
+        selected_fragments.append({
+            "target_id": target_id,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": text,
+        })
+        used_targets.add(target_id)
+    if not selected_fragments:
+        raise HTTPException(400, "Не осталось пригодных заданий для схем")
     try:
         async with _drawing_generation_lock:
-            drawings = await asyncio.to_thread(drawing_generator.generate_drawings, transcript)
+            drawings = await asyncio.to_thread(
+                drawing_generator.generate_drawings,
+                transcript,
+                selected_fragments,
+            )
     except Exception as exc:
-        raise HTTPException(502, f"Не удалось получить рисунки от GPT: {exc}")
+        raise HTTPException(502, f"Не удалось получить рисунки от BigPickle: {exc}")
     return {"drawings": drawings}
+
+
+@app.post("/api/montage/drawings/revise")
+async def revise_montage_drawing(request: Request):
+    client_host = request.client.host if request.client else ""
+    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(403, "Изменение рисунков доступно только локально")
+    origin = request.headers.get("origin", "")
+    if origin and origin not in {
+        "http://127.0.0.1:8000", "http://localhost:8000",
+        "https://127.0.0.1:8000", "https://localhost:8000",
+    }:
+        raise HTTPException(403, "Недопустимый источник запроса")
+    if _drawing_generation_lock.locked():
+        raise HTTPException(409, "BigPickle уже обрабатывает рисунки")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Некорректный JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Некорректный запрос")
+    instruction = str(payload.get("instruction") or "").strip()
+    if not instruction:
+        raise HTTPException(400, "Опишите, как изменить схему")
+    if len(instruction) > 2000:
+        raise HTTPException(400, "Инструкция слишком длинная")
+    overlay = payload.get("drawing")
+    if not isinstance(overlay, dict) or not isinstance(overlay.get("drawing"), dict):
+        raise HTTPException(400, "Нет данных схемы для изменения")
+    try:
+        async with _drawing_generation_lock:
+            revised = await asyncio.to_thread(
+                drawing_generator.revise_drawing,
+                overlay,
+                instruction,
+            )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise HTTPException(502, f"BigPickle вернул некорректную схему: {exc}")
+    except Exception as exc:
+        raise HTTPException(502, f"Не удалось изменить схему: {exc}")
+    return {"drawing": revised}
 
 
 @app.post("/api/montage/render")

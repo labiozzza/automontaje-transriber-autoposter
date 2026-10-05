@@ -9,12 +9,116 @@ from .opencode_client import ask_json
 
 
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$")
+_ALLOWED_VIZ_TYPES = {"chart", "process", "comparison", "hierarchy", "card"}
+_CHART_TRENDS = {"up", "down", "flat", "wave"}
+
+
+def _sanitize_label(value: Any, limit: int = 24) -> str:
+    text = re.sub(r"[\x00-\x1f<>]", "", str(value or "").strip())
+    return text[:limit]
+
+
+def classify_request(text: str) -> str:
+    """Определяет тип визуализации по тексту запроса (или явному префиксу)."""
+    lower = (text or "").strip().lower()
+    prefix_map = [
+        ("график:", "chart"), ("диаграмм", "chart"), ("схема:", "abstract"),
+        ("процесс:", "process"), ("карточка:", "card"), ("сравнение:", "comparison"),
+        ("иерархия:", "hierarchy"), ("таблица:", "card"),
+    ]
+    for prefix, kind in prefix_map:
+        if lower.startswith(prefix):
+            return kind
+    chart_words = ("график", "диаграм", "гистограмм", "столбчат", "ось", "оси", "абсцисс",
+                   "ординат", "вертикал", "горизонтал", "координат", "тренд", "возрастающ",
+                   "убывающ", "процент", "доли", "пирог")
+    process_words = ("схема работы", "процесс", "этап", "шаг", "шаги", "последовательност",
+                     "поток", "алгоритм", "как работает", "цикл", "стадия", "очередь")
+    comparison_words = ("сравн", "до и после", "плюсы", "минусы", "за и против", "против",
+                        "разница между", "vs", "лучше чем")
+    hierarchy_words = ("иерархи", "дерево", "уровни", "вложенност", "структура компании", "подчинённост")
+    card_words = ("карточка", "карточк", "таблица", "список", "статистика", "метрика", "цифра",
+                  "число", "чек-лист", "чеклист", "шапка")
+    rules = [
+        ("chart", chart_words), ("process", process_words), ("comparison", comparison_words),
+        ("hierarchy", hierarchy_words), ("card", card_words),
+    ]
+    for kind, words in rules:
+        if any(word in lower for word in words):
+            return kind
+    return "scene"
+
+
+def parse_chart_spec(text: str) -> dict[str, Any]:
+    """Вынимает из запроса оси и тренд: «вертикали клиента горизонталь контент» → Y=Клиенты, X=Контент."""
+    lower = (text or "").strip().lower()
+    spec: dict[str, Any] = {"axes": {"x": "", "y": ""}, "trend": None, "kind": "line"}
+
+    def axis_label(kind: str) -> str:
+        starters = {
+            "y": (r"вертикал\w*\s*(?:—|-|:|=\s*)?\s*", r"ось\s*y\s*[=:—]\s*", r"по\s+вертикал\w*\s*"),
+            "x": (r"горизонтал\w*\s*(?:—|-|:|=\s*)?\s*", r"ось\s*x\s*[=:—]\s*", r"по\s+горизонтал\w*\s*"),
+        }[kind]
+        for starter in starters:
+            match = re.search(starter, lower)
+            if not match:
+                continue
+            rest = lower[match.end():]
+            boundary = re.match(r"(.+?)(?:[;,.!?]| вертикал|\s+горизонтал|\s+ос[иь]|\s+график|$)", rest)
+            label = (boundary.group(1) if boundary else rest).strip(" —:-")
+            if label:
+                return label
+        return ""
+
+    spec["axes"]["y"] = axis_label("y")
+    spec["axes"]["x"] = axis_label("x")
+    for trend, keywords in (
+        ("up", (r"\bвозрастающ|\bрастёт|\bрастет|\bрастущ|\bрост|\bувеличива|\bповыша|\bвверх|\bв гору|\bвосходящ")),
+        ("down", (r"\bубывающ|\bпадени|\bпада[ею]т?|\bснижа|\bуменьша|\bпонижа|\bвниз|\bнисходящ|\bспад")),
+        ("flat", (r"\bровн|\bстабильн|\bплоск|\bнеизмен|\bбез изменений")),
+        ("wave", (r"\bколебл|\bволн|\bскачк|\bзыгзаг|\bзигзаг")),
+    ):
+        if re.search(keywords, lower):
+            spec["trend"] = trend
+            break
+    if re.search(r"гистограмм|столбчат|бар-|бары", lower):
+        spec["kind"] = "bar"
+    elif re.search(r"кругов|пирог|донут|доли |процент", lower):
+        spec["kind"] = "donut"
+    return spec
+
+
+def chart_viz_for_request(text: str) -> dict[str, Any] | None:
+    spec = parse_chart_spec(text)
+    if not (spec["axes"]["x"] or spec["axes"]["y"] or spec["trend"]):
+        return None
+    return {
+        "type": "chart",
+        "axes": spec["axes"],
+        "kind": spec["kind"],
+        "trend": spec["trend"] or "up",
+    }
 
 
 def validate_drawing_overlay(raw: Any, index: int = 0) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("Рисунок должен быть объектом")
     source = raw.get("drawing") if isinstance(raw.get("drawing"), dict) else raw
+    viz = raw.get("viz") if isinstance(raw.get("viz"), dict) else {}
+    if str(viz.get("type", "")).strip() in _ALLOWED_VIZ_TYPES:
+        axes = viz.get("axes") if isinstance(viz.get("axes"), dict) else {}
+        trend = str(viz.get("trend") or "").strip()
+        normalized_viz = {
+            "type": str(viz.get("type")).strip(),
+            "axes": {
+                "x": _sanitize_label(axes.get("x")),
+                "y": _sanitize_label(axes.get("y")),
+            },
+            "kind": _sanitize_label(viz.get("kind") or "line", 20) or "line",
+            "trend": trend if trend in _CHART_TRENDS else "up",
+        }
+    else:
+        normalized_viz = None
     width = min(2000, max(100, int(source.get("width") or 1000)))
     height = min(2000, max(100, int(source.get("height") or 1000)))
     raw_paths = source.get("paths")
@@ -54,6 +158,25 @@ def validate_drawing_overlay(raw: Any, index: int = 0) -> dict[str, Any]:
         raise ValueError("GPT не создал пригодных линий")
     start = max(0.0, min(86399.0, float(raw.get("start") or 0)))
     end = max(start + 0.5, min(86400.0, float(raw.get("end") or start + 4)))
+    total_length = sum(
+        math.hypot(points[position][0] - points[position - 1][0], points[position][1] - points[position - 1][1])
+        for path in paths
+        for points in [path["points"]]
+        for position in range(1, len(points))
+    )
+    duration = end - start
+    stroke_pause = min(0.03, duration * 0.12 / max(1, len(paths) - 1))
+    default_draw_seconds = max(0.08, duration * 0.8 - max(0, len(paths) - 1) * stroke_pause)
+    requested_speed = raw.get("draw_speed")
+    draw_speed = float(requested_speed) if requested_speed is not None else total_length / default_draw_seconds
+    drawing_payload = {
+        "width": width,
+        "height": height,
+        "stroke_pause": round(stroke_pause, 4),
+        "paths": paths,
+    }
+    if normalized_viz:
+        drawing_payload["viz"] = normalized_viz
     return {
         "uid": str(raw.get("uid") or f"drawing-{index + 1}")[:80],
         "kind": "drawing",
@@ -64,42 +187,170 @@ def validate_drawing_overlay(raw: Any, index: int = 0) -> dict[str, Any]:
         "x": round(min(1.0, max(0.0, float(raw.get("x", 0.5)))), 4),
         "y": round(min(1.0, max(0.0, float(raw.get("y", 0.35)))), 4),
         "size": min(1200, max(80, int(raw.get("size") or 360))),
-        "draw_speed": round(min(3000.0, max(10.0, float(raw.get("draw_speed") or 350))), 2),
-        "drawing": {"width": width, "height": height, "paths": paths},
+        "draw_speed": round(min(50000.0, max(10.0, draw_speed)), 2),
+        "viz": normalized_viz,
+        "drawing": drawing_payload,
     }
 
 
-def generate_drawings(transcript: str) -> list[dict[str, Any]]:
+def generate_drawings(transcript: str, selected_fragments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     transcript = transcript.strip()
     if not transcript:
         raise ValueError("Транскрипция пуста")
-    prompt = (
-        "Ты художник-раскадровщик короткого вертикального видео. Проанализируй SRT-транскрипцию "
-        "и предложи 1-6 уместных схематичных детских рисунков, которые визуально поясняют сказанное. "
-        "Не используй каталог готовых объектов: каждый рисунок придумай и построй сам свободными линиями. "
-        "Например для фразы 'собака кушает корм' самостоятельно нарисуй контур собаки, наклонённую голову, "
-        "миску и корм. Рисунок должен читаться без фотореализма, на прозрачном фоне, без текста.\n\n"
-        "Верни СТРОГО JSON без markdown по схеме:\n"
-        '{"drawings":[{"name":"...","trigger_text":"точная фраза","start":1.2,"end":5.2,'
-        '"x":0.5,"y":0.35,"size":360,"draw_speed":350,"drawing":{"width":1000,"height":1000,'
-        '"paths":[{"points":[[100,200],[120,180],[150,170]],"stroke":"#FFFFFF",'
-        '"stroke_width":10,"opacity":1,"closed":false}]}}]}\n\n'
-        "Правила: coordinates только 0..1000; каждый контур состоит из достаточно подробной ломаной; "
-        "используй много отдельных линий в естественном порядке рисования; максимум 60 линий и 2000 точек "
-        "на сцену; start/end бери из SRT; рисунок должен помещаться в холст; никаких HTML, SVG, CSS, JS, URL "
-        "или файлов; не предлагай рисунок, если он не помогает пониманию.\n\nSRT:\n"
-        + transcript[:35_000]
-    )
-    response = ask_json(prompt)
+    targets: list[dict[str, Any]] = []
+    for index, item in enumerate(selected_fragments[:12]):
+        if not isinstance(item, dict):
+            continue
+        start = max(0.0, float(item.get("start") or 0))
+        end = max(start + 0.05, float(item.get("end") or start + 1))
+        text = str(item.get("text") or "").strip()[:500]
+        if text:
+            targets.append({
+                "target_id": str(item.get("target_id") or index),
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": text,
+            })
+    if not targets:
+        raise ValueError("Не выбраны фрагменты для рисунков")
+
+    request_text = " ".join(item["text"] for item in targets)
+    intent = classify_request(request_text)
+    targets_json = json.dumps(targets, ensure_ascii=False)
+    context = transcript[:28_000]
+    if intent == "chart":
+        prompt = (
+            "Ты готовишь ДЕКАРТОВСКИЙ ГРАФИК для короткого вертикального видео. Полная транскрипция дана только "
+            "для контекста. Пользователь выбрал фрагменты: создай ровно ОДИН график для каждого TARGET и не создавай "
+            "графики для остальных частей транскрипции. Не меняй target_id, start или end.\n"
+            "Оси, стрелки и текстовые подписи осей нарисует система сама — рисовать их НЕ нужно. "
+            "Рисуй ТОЛЬКО данные в координатах 0..1000.\n"
+            "ГДЕ РАЗМЕЩАТЬ:\n"
+            "- Нижняя ось X будет проведена по y=920 от x=120 до x=880, ось Y по x=120 от y=920 до y=80.\n"
+            "- Область данных внутри [140..860] по X и [100..890] по Y.\n"
+            "- Тренд up: линия монотонно идёт слева снизу вправо вверх; down — слева сверху вправо вниз; "
+            "flat — почти горизонтально; wave — с мягкими колебаниями.\n"
+            "- Линия: одна или две касающиеся между собой ломаные из 8-14 точек, уверенные штрихи.\n"
+            "- kind=bar: отдельные вертикальные перекладины от нижней оси вверх.\n"
+            "ЗАПРЕЩЕНО: люди, стикмены, руки, карточки, видеоиконки, окна, предметы, мысли-облака, HTML, SVG.\n\n"
+            "Верни СТРОГО JSON без markdown по схеме:\n"
+            '{"drawings":[{"target_id":"0","name":"...","trigger_text":"точный текст TARGET",'
+            '"start":1.2,"end":5.2,"x":0.5,"y":0.35,"size":360,'
+            '"viz":{"type":"chart","axes":{"x":"КОНТЕНТ","y":"КЛИЕНТЫ"},"kind":"line","trend":"up"},'
+            '"drawing":{"width":1000,"height":1000,"paths":[{"points":[[140,880],[300,700],[500,520],[700,260]],'
+            '"stroke":"#55D66B","stroke_width":14,"opacity":1,"closed":false}]}}]}\n\n'
+            "В viz укажи подписи осей из смысла TARGET: ось Y (вертикаль) и ось X (горизонталь), "
+            "kind и trend из текста. Подписи до 24 символов.\n\n"
+            "TARGETS (рисовать только их):\n"
+            + targets_json
+            + "\n\nFULL_TRANSCRIPT_CONTEXT:\n"
+            + context
+        )
+    else:
+        intent_rules = {
+            "process": "Р.S. ПОКАЖИ ПРОЦЕСС: последовательность из 2-5 блоков со стрелками между ними слева "
+                       "направо, без текста внутри.\n",
+            "comparison": "Р.S. ПОКАЖИ СРАВНЕНИЕ: две стороны слева и справа, разделённые вертикальной линией "
+                          "или стрелкой, без текста внутри.\n",
+            "hierarchy": "Р.S. ПОКАЖИ ИЕРАРХИЮ: 1-3 уровня, верхний элемент и связанные с ним элементы ниже, "
+                         "без текста внутри.\n",
+            "card": "Р.S. ПОКАЖИ КАРТОЧКУ: крупная рамка с заголовком и числом-строкой, без текста внутри.\n",
+            "abstract": "Р.S. ПОКАЖИ АБСТРАКТНУЮ СХЕМУ: связи и зависимости стрелками и контурами, без текста внутри.\n",
+        }
+        prompt = (
+            "Ты создаёшь простые схематические рисунки для короткого вертикального видео. Полная транскрипция дана "
+            "только для понимания контекста. Пользователь уже сам выбрал фрагменты: создай ровно ОДИН рисунок для "
+            "каждого TARGET и не создавай рисунки для остальных частей транскрипции. Не объединяй TARGET между собой, "
+        "не меняй их target_id, start или end.\n\n"
+            "СТИЛЬ:\n"
+            "- Простая понятная схема маркером на прозрачном фоне, как объяснение на доске.\n"
+            "- Человек — аккуратный стикмен: круглая голова, линия корпуса, простые руки и ноги. Эмоцию можно показать "
+            "двумя точками глаз и линией рта. Не рисуй реалистичную анатомию.\n"
+            "- Предметы изображай несколькими узнаваемыми контурами. Убирай декоративные детали, текст и фон.\n"
+            "- В рисунке должен быть один ясный смысл. Используй стрелки и 2-3 линии движения только когда они "
+            "помогают показать действие. Никаких странных абстрактных форм.\n"
+            "- Если один герой встречается в нескольких TARGET, сохраняй того же стикмена: одинаковый размер головы, "
+            "цвет и отличительный простой признак, например кепку или причёску.\n"
+            "- Рисунок должен быть узнаваем за одну секунду и состоять из 6-20 длинных уверенных штрихов.\n\n"
+            + intent_rules.get(intent, "")
+            + "Верни СТРОГО JSON без markdown по схеме:\n"
+            '{"drawings":[{"target_id":"0","name":"...","trigger_text":"точный текст TARGET",'
+            '"start":1.2,"end":5.2,"x":0.5,"y":0.35,"size":360,'
+            '"drawing":{"width":1000,"height":1000,"paths":[{"points":[[100,200],[120,180],[150,170]],'
+            '"stroke":"#FFFFFF","stroke_width":10,"opacity":1,"closed":false}]}}]}\n\n'
+            "ТЕХНИЧЕСКИЕ ПРАВИЛА: coordinates только 0..1000; 6-20 paths и 40-250 точек на рисунок; линии "
+            "рисуются в естественном порядке; рисунок помещается в холст; никаких HTML, SVG, CSS, JS, URL или файлов.\n\n"
+            "TARGETS (рисовать только их):\n"
+            + targets_json
+            + "\n\nFULL_TRANSCRIPT_CONTEXT:\n"
+            + context
+        )
+    response = ask_json(prompt, model="opencode/big-pickle")
     raw_drawings = response.get("drawings")
     if not isinstance(raw_drawings, list):
-        raise ValueError("GPT не вернул список рисунков")
+        raise ValueError("BigPickle не вернул список рисунков")
+    target_map = {item["target_id"]: item for item in targets}
+    used_targets: set[str] = set()
     drawings: list[dict[str, Any]] = []
-    for index, raw in enumerate(raw_drawings[:6]):
+    for index, raw in enumerate(raw_drawings[:24]):
+        if not isinstance(raw, dict):
+            continue
+        target_id = str(raw.get("target_id", ""))
+        target = target_map.get(target_id)
+        if not target or target_id in used_targets:
+            continue
         try:
-            drawings.append(validate_drawing_overlay(raw, index))
+            constrained = dict(raw)
+            constrained.update({"start": target["start"], "end": target["end"], "trigger_text": target["text"]})
+            if intent == "chart":
+                forced_viz = chart_viz_for_request(request_text)
+                if forced_viz:
+                    constrained["viz"] = forced_viz
+            drawing = validate_drawing_overlay(constrained, index)
+            drawing["target_id"] = target_id
+            drawings.append(drawing)
+            used_targets.add(target_id)
         except (TypeError, ValueError, OverflowError):
             continue
     if not drawings:
-        raise ValueError("GPT не предложил пригодных рисунков")
+        raise ValueError("BigPickle не создал пригодных рисунков для выбранных фрагментов")
     return drawings
+
+
+def revise_drawing(overlay: dict[str, Any], instruction: str, index: int = 0) -> dict[str, Any]:
+    """До-рисовывает уже готовую схему: BigPickle меняет только содержимое поля drawing."""
+    inner = overlay.get("drawing") if isinstance(overlay.get("drawing"), dict) else {}
+    base = {
+        "name": str(overlay.get("name") or "Схема"),
+        "trigger_text": str(overlay.get("trigger_text") or ""),
+        "start": float(overlay.get("start") or 0.0),
+        "end": float(overlay.get("end") or 1.0),
+        "x": float(overlay.get("x") if overlay.get("x") is not None else 0.5),
+        "y": float(overlay.get("y") if overlay.get("y") is not None else 0.35),
+        "size": int(overlay.get("size") or 360),
+        "draw_speed": float(overlay.get("draw_speed") or 350),
+    }
+    viz = inner.get("viz") if isinstance(inner.get("viz"), dict) else (overlay.get("viz") if isinstance(overlay.get("viz"), dict) else None)
+    if viz:
+        base["viz"] = viz
+    base["drawing"] = inner
+    prompt = (
+        "Ты дорисовываешь ОДНУ уже готовую схему для вертикального видео. Измени только содержимое поля drawing "
+        "по инструкции пользователя. Фон не нужен, стиль «рисунок маркером», как объяснение на доске, линии "
+        "рисуются в естественном порядке.\n"
+        "СОХРАНИ без изменений: width, height, а если был виз-блок viz — его подписи осей, kind и trend.\n"
+        "ИНСТРУКЦИЯ ПОЛЬЗОВАТЕЛЯ:\n"
+        + (instruction or "")[:2000]
+        + "\n\nТЕКУЩАЯ СХЕМА (JSON):\n"
+        + json.dumps(base, ensure_ascii=False)[:30_000]
+        + "\n\nТЕХНИЧЕСКИЕ ПРАВИЛА: coordinates только 0..1000; 6-20 paths и 40-250 точек; линии в естественном "
+        "порядке; рисунок помещается в холст; никаких HTML, SVG, CSS, JS, URL или файлов. Верни СТРОГО JSON без "
+        "markdown: тот же объект, но с новым полем drawing в прежней схеме: {\"drawing\":{\"width\":1000,\"height\":1000,"
+        '"paths":[{"points":[[100,200],[120,180],[150,170]],"stroke":"#FFFFFF","stroke_width":10,"opacity":1,"closed":false}]}}'
+    )
+    response = ask_json(prompt, model="opencode/big-pickle")
+    new_inner = response.get("drawing") if isinstance(response.get("drawing"), dict) else response
+    if not isinstance(new_inner, dict) or not isinstance(new_inner.get("paths"), list):
+        raise ValueError("BigPickle не вернул содержимое изменённой схемы")
+    base["drawing"] = new_inner
+    return validate_drawing_overlay(base, index)

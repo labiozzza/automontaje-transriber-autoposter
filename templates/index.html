@@ -686,6 +686,17 @@ select option { background: var(--surface2); }
 .overlay-trash.armed { background:rgba(225,112,85,.95); border-color:#ffb8b0; transform:translate(-50%,0) scale(1.06); }
 .overlay-timeline-wrap { position:relative; }
 .drawing-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:10px 0; }
+.drawing-fragment-picker { margin:12px 0; padding:10px; border:1px solid var(--border); border-radius:10px; background:var(--surface2); }
+.drawing-fragment-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
+.drawing-fragment-list { display:grid; gap:5px; max-height:210px; overflow:auto; }
+.drawing-fragment { display:grid; grid-template-columns:auto 64px 1fr; gap:8px; align-items:start; padding:7px 8px; border-radius:7px; cursor:pointer; background:rgba(255,255,255,.025); font-size:12px; }
+.drawing-fragment:has(input:checked) { background:rgba(108,92,231,.16); outline:1px solid rgba(162,155,254,.45); }
+.drawing-fragment-time { color:var(--accent2); font-variant-numeric:tabular-nums; }
+.drawing-generation-progress { display:none; width:100%; margin:8px 0 12px; }
+.drawing-generation-progress.active { display:block; }
+.drawing-generation-progress-track { height:7px; overflow:hidden; border-radius:5px; background:rgba(255,255,255,.08); }
+.drawing-generation-progress-bar { width:0; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--accent),var(--accent2)); transition:width .35s ease; }
+.drawing-generation-progress-meta { display:flex; justify-content:space-between; margin-top:5px; color:var(--text2); font-size:11px; }
 .drawing-proposals { display:none; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; margin:10px 0 14px; }
 .drawing-proposals.active { display:grid; }
 .drawing-proposal { padding:10px; border:1px solid var(--border); border-radius:10px; background:var(--surface2); }
@@ -693,6 +704,27 @@ select option { background: var(--surface2); }
 .drawing-proposal-preview svg { width:100%; height:100%; }
 .drawing-proposal-fields { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin:8px 0; }
 .drawing-proposal-fields input { min-width:0; padding:7px; }
+.drawing-revise-panel { display:none; margin-top:12px; padding-top:12px; border-top:1px solid var(--border); grid-column:1 / -1; }
+.drawing-revise-panel.active { display:block; }
+.drawing-revise-panel label { display:block; margin-bottom:6px; font-size:12px; color:var(--text2); }
+.drawing-revise-panel textarea { width:100%; min-width:0; box-sizing:border-box; resize:vertical; }
+.drawing-revise-actions { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+.drawing-revise-actions .btn[disabled] { opacity:.55; cursor:not-allowed; }
+.drawing-proposal-revise { display:flex; gap:6px; margin:8px 0 4px; }
+.drawing-proposal-revise textarea { flex:1; min-width:0; padding:7px 8px; font-size:12px; resize:vertical; }
+.drawing-proposal-revise .btn { white-space:nowrap; }
+.drawing-proposal-revise .drawing-generation-progress { margin:6px 0 0; }
+.drawing-proposal-actions { display:flex; gap:6px; }
+.drawing-proposal-actions .btn[disabled] { opacity:.55; cursor:not-allowed; }
+.drawing-replica-editor { margin:12px 0; padding:10px; border:1px solid var(--border); border-radius:10px; background:var(--surface2); }
+.drawing-replica-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
+.drawing-replica-list { display:grid; gap:6px; max-height:280px; overflow:auto; }
+.drawing-replica { display:grid; grid-template-columns:64px 1fr auto; gap:8px; align-items:center; padding:7px 8px; border:1px solid var(--border); border-radius:7px; background:rgba(255,255,255,.025); font-size:12px; }
+.drawing-replica-fields { display:grid; gap:5px; min-width:0; }
+.drawing-replica-text { width:100%; padding:7px 8px; font-size:12px; }
+.drawing-replica-times { display:flex; gap:10px; color:var(--text2); }
+.drawing-replica-times input { width:74px; padding:5px 6px; }
+.btn-small { padding:4px 8px; font-size:11px; }
 .overlay-timeline {
   position:relative; min-height:44px; margin:8px 0 4px; padding:4px 0;
   overflow:hidden; border:1px solid var(--border); border-radius:8px;
@@ -1024,9 +1056,27 @@ select option { background: var(--surface2); }
           <div class="overlay-timeline" id="overlayTimeline"><div class="overlay-timeline-empty">Добавьте картинку кнопкой +</div></div>
           <input id="montageOverlayUpload" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onchange="handleOverlayUpload(this.files)">
         </div>
+        <div class="drawing-fragment-picker" id="drawingFragmentPicker">
+          <div class="drawing-fragment-head">
+            <strong>Фрагменты для схем</strong>
+            <span class="toggle-desc" id="drawingFragmentCount">Выберите до 12</span>
+          </div>
+          <div class="drawing-fragment-list" id="drawingFragmentList"><span class="toggle-desc">Выберите проект с транскрипцией</span></div>
+        </div>
+        <div class="drawing-replica-editor" id="drawingReplicaEditor" style="display:none">
+          <div class="drawing-replica-head">
+            <strong>Задания для схем</strong>
+            <button class="btn btn-small" type="button" onclick="addDrawingReplica()">+ Добавить реплику</button>
+          </div>
+          <div class="drawing-replica-list" id="drawingReplicaList"></div>
+        </div>
         <div class="drawing-actions">
-          <button class="btn" type="button" id="generateDrawingsBtn" onclick="generateMontageDrawings()">GPT: предложить рисунки</button>
-          <span class="toggle-desc" id="drawingGenerationStatus">Рисунки появятся здесь перед добавлением на таймлайн</span>
+          <button class="btn" type="button" id="generateDrawingsBtn" onclick="generateMontageDrawings()">BigPickle: создать схемы</button>
+          <span class="toggle-desc" id="drawingGenerationStatus">Отметьте фрагменты или добавьте свои реплики для схем</span>
+        </div>
+        <div class="drawing-generation-progress" id="drawingGenerationProgress">
+          <div class="drawing-generation-progress-track"><div class="drawing-generation-progress-bar" id="drawingGenerationProgressBar"></div></div>
+          <div class="drawing-generation-progress-meta"><span id="drawingGenerationProgressLabel">Подготовка</span><span id="drawingGenerationProgressPercent">0%</span></div>
         </div>
         <div class="drawing-proposals" id="drawingProposals"></div>
         <div class="overlay-inspector" id="overlayInspector">
@@ -1035,7 +1085,19 @@ select option { background: var(--surface2); }
             <div class="setting-group"><label>Начало, сек</label><input type="number" id="overlayStart" min="0" step="0.05" oninput="updateSelectedOverlayFromInputs()"></div>
             <div class="setting-group"><label>Конец, сек</label><input type="number" id="overlayEnd" min="0.05" step="0.05" oninput="updateSelectedOverlayFromInputs()"></div>
             <div class="setting-group"><label>Размер, px</label><input type="number" id="overlaySize" min="20" max="1200" step="10" oninput="updateSelectedOverlayFromInputs()"></div>
-            <div class="setting-group" id="overlayDrawSpeedGroup" style="display:none"><label>Скорость рисования</label><input type="number" id="overlayDrawSpeed" min="10" max="3000" step="10" oninput="updateSelectedOverlayFromInputs()"></div>
+            <div class="setting-group" id="overlayDrawSpeedGroup" style="display:none"><label>Скорость рисования</label><input type="number" id="overlayDrawSpeed" min="10" max="50000" step="10" oninput="updateSelectedOverlayFromInputs()"></div>
+          </div>
+          <div class="drawing-revise-panel" id="drawingRevisePanel">
+            <label for="drawingReviseText">Как изменить схему</label>
+            <textarea id="drawingReviseText" rows="2" placeholder="Например: сделай линию роста круче и добавь стрелку между блоками"></textarea>
+            <div class="drawing-revise-actions">
+              <button class="btn" type="button" id="drawingReviseBtn" onclick="reviseSelectedDrawing()">Изменить через BigPickle</button>
+              <button class="btn" type="button" id="drawingRevertBtn" onclick="revertSelectedDrawing()">Откатить</button>
+            </div>
+            <div class="drawing-generation-progress" id="drawingReviseProgress">
+              <div class="drawing-generation-progress-track"><div class="drawing-generation-progress-bar" id="drawingReviseProgressBar"></div></div>
+              <div class="drawing-generation-progress-meta"><span id="drawingReviseProgressLabel">Подготовка</span><span id="drawingReviseProgressPercent">0%</span></div>
+            </div>
           </div>
           <div class="overlay-position" id="overlayPosition">X 0.50 · Y 0.50 · слой 1</div>
         </div>
@@ -1507,6 +1569,8 @@ async function loadResult() {
     const data = await res.json();
     segments = data.segments;
     transcriptJobId = jobId;
+    window.__lastSegs = segments;
+    renderDrawingFragmentSelector(segments);
     setTranscriptDirty(false);
     document.getElementById('resultsCard').classList.add('active');
     document.getElementById('montageTranscriptInfo').textContent = `Использовать транскрибацию: ${data.segments.length} сегментов`;
@@ -2113,6 +2177,7 @@ async function showProjectPreview(p) {
     segs = d.segments || [];
   } catch(e) {}
   window.__lastSegs = segs;
+  renderDrawingFragmentSelector(segs);
   if (window.__projectOverlay) {
     window.__projectOverlay.setSegments(buildPreviewSubtitleSegments(segs, document.getElementById('montageSubtitleMode').value));
   }
@@ -2201,7 +2266,147 @@ let montageOverlays = [];
 let selectedOverlayUid = '';
 let overlaySequence = 0;
 let pendingDrawings = [];
+let drawingProgressTimer = null;
+let drawingReplicas = [];
+let proposalReviseText = [];
+const proposalRevising = new Set();
+const pendingRevisionHistory = new Map();
+const drawingRevisions = new Map();
+let drawingInspectorUid = '';
 const overlayManifestCache = new Map();
+
+function renderDrawingFragmentSelector(sourceSegments) {
+  const list = document.getElementById('drawingFragmentList');
+  const clean = (sourceSegments || []).filter(segment => String(segment.text || '').trim());
+  if (!clean.length) {
+    list.innerHTML = '<span class="toggle-desc">Нет доступной транскрипции</span>';
+    updateDrawingFragmentCount();
+    return;
+  }
+  list.innerHTML = clean.map(segment => {
+    const index = (sourceSegments || []).indexOf(segment);
+    return `<label class="drawing-fragment">
+      <input type="checkbox" data-drawing-segment="${index}" onchange="toggleDrawingReplica(this)">
+      <span class="drawing-fragment-time">${fmtTimecode(Number(segment.start) || 0)}</span>
+      <span>${esc(String(segment.text || '').trim())}</span>
+    </label>`;
+  }).join('');
+  syncDrawingFragmentCheckboxes();
+  updateDrawingFragmentCount();
+}
+
+function syncDrawingFragmentCheckboxes() {
+  [...document.querySelectorAll('[data-drawing-segment]')].forEach(input => {
+    input.checked = drawingReplicas.some(row => row.segment_index === Number(input.dataset.drawingSegment));
+  });
+}
+
+function toggleDrawingReplica(input) {
+  const source = window.__lastSegs || [];
+  const segmentIndex = Number(input.dataset.drawingSegment);
+  if (input.checked) {
+    if (drawingReplicas.some(row => row.segment_index === segmentIndex)) return;
+    if (drawingReplicas.length >= 12) {
+      input.checked = false;
+      montageError('Можно подготовить не более 12 заданий для схем');
+      return;
+    }
+    const segment = source[segmentIndex] || {};
+    drawingReplicas.push({
+      uid: `replica-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      segment_index: segmentIndex,
+      start: Number(segment.start) || 0,
+      end: Number(segment.end) || 1,
+      text: String(segment.text || '').trim(),
+    });
+  } else {
+    drawingReplicas = drawingReplicas.filter(row => row.segment_index !== segmentIndex);
+  }
+  renderDrawingReplicaEditor();
+  updateDrawingFragmentCount();
+}
+
+function addDrawingReplica() {
+  if (drawingReplicas.length >= 12) {
+    montageError('Можно подготовить не более 12 заданий для схем');
+    return;
+  }
+  drawingReplicas.push({
+    uid: `replica-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+    segment_index: null,
+    start: 0,
+    end: 1,
+    text: '',
+  });
+  renderDrawingReplicaEditor();
+  updateDrawingFragmentCount();
+}
+
+function removeDrawingReplica(button, uid) {
+  drawingReplicas = drawingReplicas.filter(row => row.uid !== uid);
+  renderDrawingReplicaEditor();
+  updateDrawingFragmentCount();
+  syncDrawingFragmentCheckboxes();
+}
+
+function renderDrawingReplicaEditor() {
+  const editor = document.getElementById('drawingReplicaEditor');
+  const list = document.getElementById('drawingReplicaList');
+  if (!editor || !list) return;
+  editor.style.display = drawingReplicas.length ? '' : 'none';
+  list.innerHTML = drawingReplicas.map(row => {
+    const segment = row.segment_index != null ? (window.__lastSegs || [])[row.segment_index] : null;
+    const timeLabel = segment ? fmtTimecode(Number(segment.start) || 0) : 'Вручную';
+    return `<div class="drawing-replica" data-uid="${esc(row.uid)}">
+      <span class="drawing-fragment-time">${esc(timeLabel)}</span>
+      <div class="drawing-replica-fields">
+        <input type="text" class="drawing-replica-text" value="${esc(row.text)}" placeholder="Реплика — задание для схемы" data-role="text">
+        <span class="drawing-replica-times">
+          <label>с <input type="number" min="0" step="0.1" value="${Number(row.start).toFixed(2)}" data-role="start"></label>
+          <label>по <input type="number" min="0.05" step="0.1" value="${Number(row.end).toFixed(2)}" data-role="end"></label>
+        </span>
+      </div>
+      <button class="btn btn-small" type="button" onclick="removeDrawingReplica(this, '${esc(row.uid)}')" title="Удалить задание">Удалить</button>
+    </div>`;
+  }).join('');
+}
+
+function selectedDrawingFragments() {
+  const result = [];
+  const rows = [...document.querySelectorAll('#drawingReplicaList .drawing-replica')];
+  for (const row of rows) {
+    const stored = drawingReplicas.find(item => item.uid === row.dataset.uid) || {};
+    const text = row.querySelector('[data-role="text"]').value.trim();
+    const start = Number(row.querySelector('[data-role="start"]').value);
+    const end = Number(row.querySelector('[data-role="end"]').value);
+    if (!text) {
+      montageError('Заполните текст во всех заданиях для схем');
+      return null;
+    }
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start + 0.05) {
+      montageError(`Некорректное время показа для «${text.slice(0, 40)}»`);
+      return null;
+    }
+    const item = {start, end, text: text.slice(0, 500)};
+    if (stored.segment_index != null) item.segment_index = stored.segment_index;
+    else item.target_id = `manual-${row.dataset.uid}`;
+    result.push(item);
+  }
+  return result;
+}
+
+function updateDrawingFragmentCount() {
+  const count = document.getElementById('drawingFragmentCount');
+  if (count) count.textContent = drawingReplicas.length ? `Заданий: ${drawingReplicas.length} / 12` : 'Отметьте фрагменты транскрипции';
+}
+
+function updateDrawingGenerationProgress(percent, label, active = true) {
+  const value = clamp(Number(percent) || 0, 0, 100);
+  document.getElementById('drawingGenerationProgress').classList.toggle('active', active);
+  document.getElementById('drawingGenerationProgressBar').style.width = `${value}%`;
+  document.getElementById('drawingGenerationProgressPercent').textContent = `${Math.round(value)}%`;
+  document.getElementById('drawingGenerationProgressLabel').textContent = label;
+}
 
 function montageOverlayDuration() {
   const video = document.getElementById('projectPreviewVideo');
@@ -2237,39 +2442,77 @@ function drawingPathLength(points) {
   return length;
 }
 
-function drawingSvgMarkup(drawing, visibleLength = Infinity) {
+function easeHandMotion(progress) {
+  const value = clamp(progress, 0, 1);
+  return value * value * (3 - 2 * value);
+}
+
+function chartAxesMarkup(viz) {
+  const axes = viz.axes || {};
+  const xLabel = String(axes.x || '').trim();
+  const yLabel = String(axes.y || '').trim();
+  const axisStroke = 'stroke="#ffffff" stroke-opacity="0.92" stroke-width="3" stroke-linecap="round"';
+  let markup = `<line x1="120" y1="920" x2="880" y2="920" ${axisStroke}/>`;
+  markup += `<path d="M880 920 L854 904 L854 936 Z" fill="#ffffff" fill-opacity="0.92"/>`;
+  markup += `<line x1="120" y1="920" x2="120" y2="80" ${axisStroke}/>`;
+  markup += `<path d="M120 80 L104 106 L136 106 Z" fill="#ffffff" fill-opacity="0.92"/>`;
+  const font = 'font-family="Comfortaa, sans-serif" font-size="44" fill="#ffffff"';
+  if (xLabel) markup += `<text x="500" y="992" text-anchor="middle" ${font}>${esc(xLabel)}</text>`;
+  if (yLabel) markup += `<text transform="translate(52 500) rotate(-90)" text-anchor="middle" ${font}>${esc(yLabel)}</text>`;
+  return markup;
+}
+
+function drawingSvgMarkup(drawing, elapsed = Infinity, drawSpeed = 350) {
   const width = Number(drawing?.width) || 1000;
   const height = Number(drawing?.height) || 1000;
-  let remaining = Math.max(0, visibleLength);
+  let cursor = 0;
+  const strokePause = clamp(Number(drawing?.stroke_pause ?? .03), 0, .1);
   const paths = (drawing?.paths || []).map(path => {
     const length = drawingPathLength(path.points);
-    const visible = !Number.isFinite(remaining) ? 1 : clamp(remaining / Math.max(.001, length), 0, 1);
-    remaining -= length;
+    const strokeDuration = Math.max(.04, length / Math.max(1, drawSpeed));
+    const visible = !Number.isFinite(elapsed) ? 1 : easeHandMotion((elapsed - cursor) / strokeDuration);
+    cursor += strokeDuration + strokePause;
     const points = (path.points || []).map(point => `${Number(point[0]).toFixed(2)},${Number(point[1]).toFixed(2)}`).join(' ');
     const opacity = clamp(Number(path.opacity) || 1, .1, 1);
     const closedPoints = path.closed && visible >= 1 && path.points?.length ? `${points} ${path.points[0][0]},${path.points[0][1]}` : points;
     return `<polyline points="${closedPoints}" fill="none" stroke="${esc(path.stroke || '#fff')}" stroke-width="${clamp(Number(path.stroke_width) || 8, 1, 40)}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}" pathLength="1" stroke-dasharray="1" stroke-dashoffset="${(1 - visible).toFixed(5)}"/>`;
   }).join('');
-  return `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${paths}</svg>`;
+  const chart = drawing?.viz?.type === 'chart' ? chartAxesMarkup(drawing.viz) : '';
+  return `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${chart}${paths}</svg>`;
 }
 
 function renderDrawingProposals() {
   const root = document.getElementById('drawingProposals');
   root.classList.toggle('active', pendingDrawings.length > 0);
-  root.innerHTML = pendingDrawings.map((drawing, index) => `<div class="drawing-proposal">
+  root.innerHTML = pendingDrawings.map((drawing, index) => {
+    if (!drawing._pid) drawing._pid = `proposal-${Date.now().toString(36)}-${index}-${Math.random().toString(36).slice(2, 7)}`;
+    const revising = proposalRevising.has(drawing._pid);
+    const canRevert = (pendingRevisionHistory.get(drawing._pid) || []).length > 0;
+    const reviseText = proposalReviseText[index] || '';
+    return `<div class="drawing-proposal">
     <div class="drawing-proposal-preview">${drawingSvgMarkup(drawing.drawing)}</div>
     <strong>${esc(drawing.name)}</strong>
     <div class="toggle-desc">${esc(drawing.trigger_text || '')}</div>
     <div class="drawing-proposal-fields">
       <input type="number" step="0.05" value="${drawing.start}" title="Начало" onchange="updatePendingDrawing(${index},'start',this.value)">
       <input type="number" step="0.05" value="${drawing.end}" title="Конец" onchange="updatePendingDrawing(${index},'end',this.value)">
-      <input type="number" step="10" value="${drawing.draw_speed}" title="Скорость" onchange="updatePendingDrawing(${index},'draw_speed',this.value)">
+      <input type="number" min="10" max="50000" step="10" value="${drawing.draw_speed}" title="Скорость" oninput="updatePendingDrawing(${index},'draw_speed',this.value)">
     </div>
-    <div style="display:flex;gap:6px">
-      <button class="btn btn-primary" type="button" onclick="approvePendingDrawing(${index})">Добавить</button>
-      <button class="btn" type="button" onclick="discardPendingDrawing(${index})">Отклонить</button>
+    <div class="drawing-proposal-revise">
+      <textarea rows="1" placeholder="Как изменить эту схему?" ${revising ? 'disabled' : ''} oninput="proposalReviseText[${index}]=this.value">${esc(reviseText)}</textarea>
+      <button class="btn" type="button" ${revising ? 'disabled' : ''} onclick="revisePendingDrawing(${index})">Изменить</button>
+      ${canRevert ? `<button class="btn" type="button" ${revising ? 'disabled' : ''} onclick="revertPendingDrawing(${index})">Откатить</button>` : ''}
     </div>
-  </div>`).join('');
+    <div class="drawing-generation-progress" id="drawingProposalProgress${index}">
+      <div class="drawing-generation-progress-track"><div class="drawing-generation-progress-bar" id="drawingProposalProgressBar${index}"></div></div>
+      <div class="drawing-generation-progress-meta"><span id="drawingProposalProgressLabel${index}">Подготовка</span><span id="drawingProposalProgressPercent${index}">0%</span></div>
+    </div>
+    <div class="drawing-proposal-actions">
+      <button class="btn btn-primary" type="button" ${revising ? 'disabled' : ''} onclick="approvePendingDrawing(${index})">Добавить</button>
+      <button class="btn" type="button" ${revising ? 'disabled' : ''} onclick="discardPendingDrawing(${index})">Отклонить</button>
+    </div>
+  </div>`;
+  }).join('');
 }
 
 function updatePendingDrawing(index, key, value) {
@@ -2278,11 +2521,91 @@ function updatePendingDrawing(index, key, value) {
   if (!drawing || !Number.isFinite(number)) return;
   if (key === 'start') drawing.start = Math.max(0, number);
   if (key === 'end') drawing.end = Math.max(drawing.start + .05, number);
-  if (key === 'draw_speed') drawing.draw_speed = clamp(number, 10, 3000);
+  if (key === 'draw_speed') drawing.draw_speed = clamp(number, 10, 50000);
 }
 
 function discardPendingDrawing(index) {
+  const proposal = pendingDrawings[index];
+  proposalReviseText.splice(index, 1);
+  if (proposal?._pid) pendingRevisionHistory.delete(proposal._pid);
   pendingDrawings.splice(index, 1);
+  renderDrawingProposals();
+}
+
+function updateProposalProgress(index, value, label) {
+  const container = document.getElementById(`drawingProposalProgress${index}`);
+  const bar = document.getElementById(`drawingProposalProgressBar${index}`);
+  const percent = document.getElementById(`drawingProposalProgressPercent${index}`);
+  const text = document.getElementById(`drawingProposalProgressLabel${index}`);
+  if (!container || !bar) return;
+  const active = Number(value) >= 0;
+  container.classList.toggle('active', active);
+  if (active) {
+    bar.style.width = `${clamp(Number(value) || 0, 0, 100)}%`;
+    percent.textContent = `${Math.round(Number(value) || 0)}%`;
+    text.textContent = label;
+  }
+}
+
+function pushPendingRevision(pid, proposal) {
+  const list = pendingRevisionHistory.get(pid) || [];
+  list.push({drawing: JSON.parse(JSON.stringify(proposal.drawing)), name: proposal.name,
+             trigger_text: proposal.trigger_text, draw_speed: proposal.draw_speed});
+  if (list.length > 10) list.shift();
+  pendingRevisionHistory.set(pid, list);
+}
+
+async function revisePendingDrawing(index) {
+  const proposal = pendingDrawings[index];
+  if (!proposal) return;
+  if (proposalRevising.has(proposal._pid)) return;
+  const instruction = (proposalReviseText[index] || '').trim();
+  if (!instruction) return montageError('Опишите, как изменить схему');
+  proposalRevising.add(proposal._pid);
+  renderDrawingProposals();
+  updateProposalProgress(index, 6, 'Подготовка схемы');
+  const timer = setInterval(() => {
+    const current = Number(document.getElementById(`drawingProposalProgressPercent${index}`)?.textContent) || 0;
+    const next = Math.min(92, current + Math.max(.4, (92 - current) * .035));
+    updateProposalProgress(index, next, next < 24 ? 'Подготовка контекста' : 'BigPickle вносит изменения');
+  }, 700);
+  try {
+    const response = await fetch('/api/montage/drawings/revise', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({drawing: proposal, instruction}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+    pushPendingRevision(proposal._pid, proposal);
+    const revised = data.drawing || {};
+    proposal.drawing = revised.drawing || proposal.drawing;
+    if (revised.name) proposal.name = revised.name;
+    proposal.trigger_text = revised.trigger_text || proposal.trigger_text;
+    proposal.draw_speed = revised.draw_speed || proposal.draw_speed;
+    updateProposalProgress(index, 100, 'Схема обновлена');
+    proposalReviseText[index] = '';
+  } catch (error) {
+    updateProposalProgress(index, 100, `Ошибка: ${error.message}`);
+  } finally {
+    clearInterval(timer);
+    proposalRevising.delete(proposal._pid);
+    setTimeout(() => { if (pendingDrawings[index]) updateProposalProgress(index, -1, ''); }, 1200);
+    renderDrawingProposals();
+  }
+}
+
+function revertPendingDrawing(index) {
+  const proposal = pendingDrawings[index];
+  if (!proposal) return;
+  const list = pendingRevisionHistory.get(proposal._pid) || [];
+  if (!list.length || proposalRevising.has(proposal._pid)) return;
+  const previous = list.pop();
+  if (list.length) pendingRevisionHistory.set(proposal._pid, list);
+  else pendingRevisionHistory.delete(proposal._pid);
+  proposal.drawing = previous.drawing;
+  proposal.name = previous.name;
+  proposal.trigger_text = previous.trigger_text;
+  proposal.draw_speed = previous.draw_speed;
   renderDrawingProposals();
 }
 
@@ -2290,12 +2613,15 @@ function approvePendingDrawing(index) {
   if (montageOverlays.length >= 20) return montageError('Можно добавить не более 20 наложений');
   const proposal = pendingDrawings[index];
   if (!proposal) return;
+  if (proposalRevising.has(proposal._pid)) return montageError('Дождитесь завершения изменения схемы');
   const duration = montageOverlayDuration();
   const start = clamp(Number(proposal.start) || 0, 0, Math.max(0, duration - .05));
   const end = clamp(Number(proposal.end) || start + 4, start + .05, duration);
   const uid = `drawing-${Date.now().toString(36)}-${++overlaySequence}`;
   montageOverlays.push({...proposal, uid, kind:'drawing', start, end, z_index:montageOverlays.length});
   selectedOverlayUid = uid;
+  proposalReviseText.splice(index, 1);
+  pendingRevisionHistory.delete(proposal._pid);
   pendingDrawings.splice(index, 1);
   document.getElementById('projectPreviewVideo').currentTime = start;
   renderDrawingProposals();
@@ -2306,6 +2632,13 @@ async function generateMontageDrawings() {
   const button = document.getElementById('generateDrawingsBtn');
   const status = document.getElementById('drawingGenerationStatus');
   const payload = {};
+  const selectedFragments = selectedDrawingFragments();
+  if (selectedFragments === null) return;
+  if (!selectedFragments.length) {
+    montageError('Добавьте хотя бы одну реплику или отметьте фрагмент транскрипции');
+    return;
+  }
+  payload.selected_fragments = selectedFragments;
   if (selectedProjectId) payload.project_id = selectedProjectId;
   else if (transcriptJobId) payload.transcript_job_id = transcriptJobId;
   else {
@@ -2317,22 +2650,62 @@ async function generateMontageDrawings() {
     return;
   }
   button.disabled = true;
-  status.textContent = 'OpenCode/GPT анализирует транскрипцию и рисует сцены...';
+  status.textContent = 'BigPickle создаёт схемы только для выбранных фрагментов...';
+  let progress = 8;
+  updateDrawingGenerationProgress(progress, 'Подготовка полной транскрипции');
+  clearInterval(drawingProgressTimer);
+  drawingProgressTimer = setInterval(() => {
+    progress = Math.min(92, progress + Math.max(.5, (92 - progress) * .035));
+    updateDrawingGenerationProgress(progress, progress < 22 ? 'Подготовка контекста' : 'BigPickle строит схемы');
+  }, 700);
   try {
     const response = await fetch('/api/montage/drawings/generate', {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+    updateDrawingGenerationProgress(100, 'Схемы готовы');
+    proposalReviseText = [];
+    proposalRevising.clear();
+    pendingRevisionHistory.clear();
     pendingDrawings = data.drawings || [];
     renderDrawingProposals();
-    status.textContent = `GPT предложил рисунков: ${pendingDrawings.length}. Добавьте нужные на таймлайн.`;
+    status.textContent = `BigPickle создал схем: ${pendingDrawings.length}. Добавьте нужные на таймлайн.`;
   } catch (error) {
-    status.textContent = `Ошибка GPT: ${error.message}`;
+    updateDrawingGenerationProgress(progress, 'Ошибка генерации');
+    status.textContent = `Ошибка BigPickle: ${error.message}`;
   } finally {
+    clearInterval(drawingProgressTimer);
+    drawingProgressTimer = null;
     button.disabled = false;
   }
 }
+
+function parseDrawingSrt(text) {
+  const blocks = String(text || '').replace(/\r/g, '').trim().split(/\n{2,}/);
+  return blocks.map(block => {
+    const lines = block.split('\n');
+    const timingIndex = lines.findIndex(line => line.includes('-->'));
+    if (timingIndex < 0) return null;
+    const parse = value => {
+      const parts = value.trim().replace(',', '.').split(':').map(Number);
+      return parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : 0;
+    };
+    const [start, end] = lines[timingIndex].split('-->').map(parse);
+    const fragmentText = lines.slice(timingIndex + 1).join(' ').trim();
+    return fragmentText ? {start, end, text:fragmentText} : null;
+  }).filter(Boolean);
+}
+
+document.getElementById('montageSrtInput').addEventListener('change', async event => {
+  const file = event.target.files[0];
+  if (!file || selectedProjectId || transcriptJobId) return;
+  window.__lastSegs = parseDrawingSrt(await file.text());
+  drawingReplicas = drawingReplicas.filter(row => row.segment_index == null);
+  renderDrawingFragmentSelector(window.__lastSegs);
+  renderDrawingReplicaEditor();
+  syncDrawingFragmentCheckboxes();
+});
 
 async function addMontageOverlay(file) {
   if (montageOverlays.length >= 20) {
@@ -2385,9 +2758,11 @@ function overlayAddButtonHtml() {
 function removeSelectedOverlay() {
   const removed = selectedMontageOverlay();
   if (removed?.imageUrl) URL.revokeObjectURL(removed.imageUrl);
+  drawingRevisions.delete(selectedOverlayUid);
   montageOverlays = montageOverlays.filter(item => item.uid !== selectedOverlayUid);
   montageOverlays.forEach((item, index) => item.z_index = index);
   selectedOverlayUid = montageOverlays.at(-1)?.uid || '';
+  drawingInspectorUid = '';
   renderOverlayEditor();
 }
 
@@ -2403,7 +2778,7 @@ function updateSelectedOverlayFromInputs() {
   if (Number.isFinite(endValue)) overlay.end = clamp(endValue, overlay.start + .05, duration);
   if (overlay.end <= overlay.start) overlay.end = Math.min(duration, overlay.start + .05);
   if (Number.isFinite(sizeValue)) overlay.size = clamp(Math.round(sizeValue), 20, 1200);
-  if (overlay.kind === 'drawing' && Number.isFinite(drawSpeedValue)) overlay.draw_speed = clamp(drawSpeedValue, 10, 3000);
+  if (overlay.kind === 'drawing' && Number.isFinite(drawSpeedValue)) overlay.draw_speed = clamp(drawSpeedValue, 10, 50000);
   renderOverlayPreview();
   renderOverlayTimeline();
   updateOverlayInspector(false);
@@ -2413,7 +2788,12 @@ function updateOverlayInspector(writeInputs = true) {
   const inspector = document.getElementById('overlayInspector');
   const overlay = selectedMontageOverlay();
   inspector.classList.toggle('active', Boolean(overlay));
-  if (!overlay) return;
+  if (!overlay) {
+    drawingInspectorUid = '';
+    document.getElementById('drawingRevisePanel').classList.remove('active');
+    updateDrawingReviseButtons();
+    return;
+  }
   document.getElementById('overlayInspectorName').textContent = overlay.name;
   if (writeInputs) {
     const duration = montageOverlayDuration();
@@ -2427,6 +2807,96 @@ function updateOverlayInspector(writeInputs = true) {
   document.getElementById('overlayDrawSpeedGroup').style.display = overlay.kind === 'drawing' ? '' : 'none';
   document.getElementById('overlayPosition').textContent =
     `X ${overlay.x.toFixed(2)} · Y ${overlay.y.toFixed(2)} · слой ${overlay.z_index + 1}`;
+  const revisePanel = document.getElementById('drawingRevisePanel');
+  if (overlay.kind === 'drawing') {
+    revisePanel.classList.add('active');
+    if (writeInputs && drawingInspectorUid !== overlay.uid) {
+      drawingInspectorUid = overlay.uid;
+      document.getElementById('drawingReviseText').value = '';
+      updateDrawingReviseProgress(-1, '');
+    }
+  } else {
+    revisePanel.classList.remove('active');
+  }
+  updateDrawingReviseButtons();
+}
+
+function updateDrawingReviseProgress(value, label) {
+  const container = document.getElementById('drawingReviseProgress');
+  if (!container) return;
+  const active = Number(value) >= 0;
+  container.classList.toggle('active', active);
+  if (active) {
+    document.getElementById('drawingReviseProgressBar').style.width = `${clamp(Number(value) || 0, 0, 100)}%`;
+    document.getElementById('drawingReviseProgressPercent').textContent = `${Math.round(Number(value) || 0)}%`;
+    document.getElementById('drawingReviseProgressLabel').textContent = label;
+  }
+}
+
+function updateDrawingReviseButtons() {
+  const overlay = selectedMontageOverlay();
+  const revising = Boolean(overlay?.drawingRevising);
+  const canRevert = overlay ? (drawingRevisions.get(overlay.uid) || []).length > 0 : false;
+  document.getElementById('drawingReviseBtn').disabled = revising || overlay?.kind !== 'drawing';
+  document.getElementById('drawingRevertBtn').disabled = !canRevert || revising;
+}
+
+async function reviseSelectedDrawing() {
+  const overlay = selectedMontageOverlay();
+  if (!overlay || overlay.kind !== 'drawing' || overlay.drawingRevising) return;
+  const instruction = document.getElementById('drawingReviseText').value.trim();
+  if (!instruction) return montageError('Опишите, как изменить схему');
+  overlay.drawingRevising = true;
+  updateDrawingReviseButtons();
+  updateDrawingReviseProgress(6, 'Подготовка схемы');
+  const timer = setInterval(() => {
+    const current = Number(document.getElementById('drawingReviseProgressPercent').textContent) || 0;
+    const next = Math.min(92, current + Math.max(.4, (92 - current) * .035));
+    const label = next < 24 ? 'Подготовка контекста' : 'BigPickle вносит изменения';
+    updateDrawingReviseProgress(next, label);
+  }, 700);
+  try {
+    const response = await fetch('/api/montage/drawings/revise', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({drawing: overlay, instruction}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+    const revised = data.drawing || {};
+    pushDrawingRevision(overlay.uid, overlay);
+    overlay.drawing = revised.drawing || overlay.drawing;
+    if (revised.name) overlay.name = revised.name;
+    overlay.trigger_text = revised.trigger_text || overlay.trigger_text;
+    overlay.draw_speed = revised.draw_speed || overlay.draw_speed;
+    updateDrawingReviseProgress(100, 'Схема обновлена');
+    document.getElementById('drawingReviseText').value = '';
+  } catch (error) {
+    updateDrawingReviseProgress(100, `Ошибка: ${error.message}`);
+  } finally {
+    clearInterval(timer);
+    delete overlay.drawingRevising;
+    renderOverlayEditor();
+    updateDrawingReviseButtons();
+  }
+}
+
+function pushDrawingRevision(uid, overlay) {
+  const list = drawingRevisions.get(uid) || [];
+  list.push(JSON.parse(JSON.stringify(overlay.drawing)));
+  if (list.length > 10) list.shift();
+  drawingRevisions.set(uid, list);
+}
+
+function revertSelectedDrawing() {
+  const overlay = selectedMontageOverlay();
+  if (!overlay || overlay.kind !== 'drawing' || overlay.drawingRevising) return;
+  const list = drawingRevisions.get(overlay.uid) || [];
+  if (!list.length) return;
+  overlay.drawing = list.pop();
+  if (list.length) drawingRevisions.set(overlay.uid, list);
+  else drawingRevisions.delete(overlay.uid);
+  renderOverlayEditor();
+  updateDrawingReviseButtons();
 }
 
 function overlayLaneMap() {
@@ -2586,7 +3056,8 @@ function renderOverlayPreview() {
       ratio = (Number(drawing.width) || 1) / (Number(drawing.height) || 1);
       item.querySelector('.drawing-host').innerHTML = drawingSvgMarkup(
         drawing,
-        Math.max(0, time - overlay.start) * (Number(overlay.draw_speed) || 350),
+        Math.max(0, time - overlay.start),
+        Number(overlay.draw_speed) || 350,
       );
     } else {
       const image = item.querySelector('img');
@@ -3461,6 +3932,22 @@ window.__projectOverlay = mountSubtitleOverlay({
   placeholder: '…',
 });
 const projectPreviewVideo = document.getElementById('projectPreviewVideo');
+let projectOverlayAnimationFrame = 0;
+function animateProjectOverlayPreview() {
+  if (projectPreviewVideo.paused || projectPreviewVideo.ended) {
+    projectOverlayAnimationFrame = 0;
+    return;
+  }
+  renderOverlayPreview();
+  syncAnimationPreview();
+  const playhead = document.querySelector('#overlayTimeline .overlay-timeline-playhead');
+  if (playhead) playhead.style.left = `${clamp((projectPreviewVideo.currentTime || 0) / montageOverlayDuration() * 100, 0, 100)}%`;
+  projectOverlayAnimationFrame = requestAnimationFrame(animateProjectOverlayPreview);
+}
+projectPreviewVideo.addEventListener('play', () => {
+  if (!projectOverlayAnimationFrame) projectOverlayAnimationFrame = requestAnimationFrame(animateProjectOverlayPreview);
+});
+projectPreviewVideo.addEventListener('pause', renderOverlayPreview);
 projectPreviewVideo.addEventListener('timeupdate', () => {
   renderOverlayPreview();
   syncAnimationPreview();

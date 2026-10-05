@@ -17,7 +17,7 @@ from types import ModuleType
 from typing import Any, Callable
 
 from .audio_censor import build_volume_filter, find_mute_intervals, needs_word_alignment
-from .secrets_env import load_secrets_env, get_software_defaults
+from .secrets_env import load_secrets_env, get_software_defaults, media_repo_dir
 
 MONAGE_DIR = Path(__file__).resolve().parent
 INSTAPOSTER_DIR = MONAGE_DIR / "instaposter"
@@ -27,7 +27,6 @@ ANIMATIONS_DIR = MONAGE_DIR / "animations"
 FACE_MODEL = MODELS_DIR / "face_landmarker.task"
 DEFAULT_FONT = FONTS_DIR / "Comfortaa.ttf"
 SYSTEM_FONT = Path("/System/Library/Fonts/Helvetica.ttc")
-MEDIA_REPO_DIR = Path(os.environ.get("GITHUB_REPO_DIR", str(MONAGE_DIR.parent / "instagram-media")))
 
 PYTHON = sys.executable
 
@@ -70,7 +69,7 @@ def opencode_ready() -> bool:
 
 
 def media_repo_ready() -> bool:
-    return (MEDIA_REPO_DIR / ".git").is_dir()
+    return (media_repo_dir() / ".git").is_dir()
 
 
 def animation_ids() -> list[dict[str, Any]]:
@@ -573,7 +572,7 @@ def render_montage(
                 "kind": "drawing",
                 "name": str(raw.get("name") or f"Рисунок {index + 1}"),
                 "trigger_text": str(raw.get("trigger_text") or ""),
-                "draw_speed": max(10.0, min(3000.0, float(raw.get("draw_speed") or 350))),
+                "draw_speed": max(10.0, min(50000.0, float(raw.get("draw_speed") or 350))),
                 "drawing": drawing,
             })
         else:
