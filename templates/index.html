@@ -696,10 +696,14 @@ select option { background: var(--surface2); }
 .drawing-generation-progress.active { display:block; }
 .drawing-generation-progress-track { height:7px; overflow:hidden; border-radius:5px; background:rgba(255,255,255,.08); }
 .drawing-generation-progress-bar { width:0; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--accent),var(--accent2)); transition:width .35s ease; }
+.drawing-generation-progress-bar.indeterminate { width:40% !important; animation:drawingProgressSlide 1.1s ease-in-out infinite; transition:none; }
+@keyframes drawingProgressSlide { 0% { transform:translateX(-110%); } 100% { transform:translateX(260%); } }
+#drawingGenerationStatus.error { color:#ff8f8f; }
 .drawing-generation-progress-meta { display:flex; justify-content:space-between; margin-top:5px; color:var(--text2); font-size:11px; }
 .drawing-proposals { display:none; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; margin:10px 0 14px; }
 .drawing-proposals.active { display:grid; }
 .drawing-proposal { padding:10px; border:1px solid var(--border); border-radius:10px; background:var(--surface2); }
+.drawing-proposal-why { margin-top:4px; padding:5px 7px; border-radius:6px; background:rgba(255,255,255,.045); color:var(--text2); font-size:11px; line-height:1.35; }
 .drawing-proposal-preview { height:150px; margin-bottom:8px; border-radius:8px; background:linear-gradient(145deg,#151826,#272d43); }
 .drawing-proposal-preview svg { width:100%; height:100%; }
 .drawing-proposal-fields { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin:8px 0; }
@@ -1072,7 +1076,7 @@ select option { background: var(--surface2); }
         </div>
         <div class="drawing-actions">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <select id="drawingGenMode" style="background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:12px">
+            <select id="drawingGenMode" onchange="applyDrawingGenMode()" style="background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:12px">
               <option value="auto">Авто — 2–3 смысловых схемы по всей транскрипции</option>
               <option value="manual">Ручной — по выбранным фрагментам</option>
             </select>
@@ -2272,7 +2276,6 @@ let montageOverlays = [];
 let selectedOverlayUid = '';
 let overlaySequence = 0;
 let pendingDrawings = [];
-let drawingProgressTimer = null;
 let drawingReplicas = [];
 let proposalReviseText = [];
 const proposalRevising = new Set();
@@ -2407,11 +2410,148 @@ function updateDrawingFragmentCount() {
 }
 
 function updateDrawingGenerationProgress(percent, label, active = true) {
-  const value = clamp(Number(percent) || 0, 0, 100);
-  document.getElementById('drawingGenerationProgress').classList.toggle('active', active);
-  document.getElementById('drawingGenerationProgressBar').style.width = `${value}%`;
-  document.getElementById('drawingGenerationProgressPercent').textContent = `${Math.round(value)}%`;
+  const indeterminate = percent === null || percent === undefined || Number.isNaN(Number(percent));
+  const root = document.getElementById('drawingGenerationProgress');
+  const bar = document.getElementById('drawingGenerationProgressBar');
+  root.classList.toggle('active', active);
+  root.classList.toggle('indeterminate', indeterminate);
+  bar.classList.toggle('indeterminate', indeterminate);
+  if (indeterminate) {
+    document.getElementById('drawingGenerationProgressPercent').textContent = '…';
+  } else {
+    const value = clamp(Number(percent) || 0, 0, 100);
+    bar.style.width = `${value}%`;
+    document.getElementById('drawingGenerationProgressPercent').textContent = `${Math.round(value)}%`;
+  }
   document.getElementById('drawingGenerationProgressLabel').textContent = label;
+}
+
+function drawingGenerationMode() {
+  const el = document.getElementById('drawingGenMode');
+  return el && el.value === 'manual' ? 'manual' : 'auto';
+}
+
+function drawingGenerationMessage(text, isError = false) {
+  const status = document.getElementById('drawingGenerationStatus');
+  status.textContent = text;
+  status.classList.toggle('error', isError);
+}
+
+function applyDrawingGenMode() {
+  const manual = drawingGenerationMode() === 'manual';
+  document.getElementById('drawingFragmentPicker').style.display = manual ? '' : 'none';
+  if (!manual) document.getElementById('drawingReplicaEditor').style.display = 'none';
+  else renderDrawingReplicaEditor();
+  const button = document.getElementById('generateDrawingsBtn');
+  button.textContent = manual ? 'Создать схемы' : 'Предложить 2–3 схемы';
+  drawingGenerationMessage(manual
+    ? 'Ручной режим: добавьте реплики или отметьте фрагменты транскрипции'
+    : 'Авто: BigPickle сам выберёт 2–3 смысловых схемы по всей транскрипции');
+}
+
+let drawingJobPollTimer = null;
+let drawingJobAppliedId = null;
+let drawingJobStartedAt = 0;
+let drawingJobPollMisses = 0;
+
+async function fetchDrawingJob(jobId) {
+  try {
+    const response = await fetch(`/api/montage/drawings/status?job_id=${encodeURIComponent(jobId)}`, {cache: 'no-store'});
+    if (!response.ok) return null;
+    return await response.json();
+  } catch (_) {
+    return null;
+  }
+}
+
+function stopDrawingJobPoll() {
+  if (drawingJobPollTimer) {
+    clearInterval(drawingJobPollTimer);
+    drawingJobPollTimer = null;
+  }
+}
+
+async function finishDrawingJob(jobId, drawings) {
+  if (drawingJobAppliedId === jobId) return;
+  drawingJobAppliedId = jobId;
+  if (localStorage.getItem('drawingGenJobId') === jobId) localStorage.removeItem('drawingGenJobId');
+  stopDrawingJobPoll();
+  updateDrawingGenerationProgress(100, 'Готово');
+  proposalReviseText = [];
+  proposalRevising.clear();
+  pendingRevisionHistory.clear();
+  pendingDrawings = drawings || [];
+  renderDrawingProposals();
+  const count = pendingDrawings.length;
+  drawingGenerationMessage(`Готово: ${count} ${count === 1 ? 'схема' : count < 5 ? 'схемы' : 'схем'}. Проверьте предложения перед добавлением на таймлайн.`);
+  document.getElementById('generateDrawingsBtn').disabled = false;
+}
+
+function finishDrawingJobError(job) {
+  if (drawingJobAppliedId === job.id) return;
+  drawingJobAppliedId = job.id;
+  if (localStorage.getItem('drawingGenJobId') === job.id) localStorage.removeItem('drawingGenJobId');
+  stopDrawingJobPoll();
+  updateDrawingGenerationProgress(100, 'Ошибка генерации');
+  drawingGenerationMessage(`Ошибка BigPickle: ${job.error || 'неизвестная ошибка'}`, true);
+  document.getElementById('generateDrawingsBtn').disabled = false;
+}
+
+function applyDrawingJobStatus(job) {
+  if (!job) return;
+  if (job.status === 'done') {
+    finishDrawingJob(String(job.id), job.drawings || []);
+    return;
+  }
+  if (job.status === 'error') {
+    finishDrawingJobError(job);
+    return;
+  }
+  const elapsed = Math.max(1, Math.round((Date.now() - drawingJobStartedAt) / 1000));
+  if (job.indeterminate) {
+    updateDrawingGenerationProgress(null, `${job.phase || 'BigPickle работает'} · ${elapsed} с`);
+  } else {
+    updateDrawingGenerationProgress(Number(job.progress) || 0, job.phase || 'Подготовка');
+  }
+}
+
+function startDrawingJobPoll(jobId) {
+  stopDrawingJobPoll();
+  drawingJobPollMisses = 0;
+  drawingJobPollTimer = setInterval(async () => {
+    const job = await fetchDrawingJob(jobId);
+    if (!job) {
+      drawingJobPollMisses += 1;
+      if (drawingJobPollMisses >= 5) stopDrawingJobPoll();
+      return;
+    }
+    drawingJobPollMisses = 0;
+    applyDrawingJobStatus(job);
+  }, 900);
+}
+
+async function restoreDrawingGenerationJob() {
+  const jobId = localStorage.getItem('drawingGenJobId');
+  if (!jobId) return;
+  const job = await fetchDrawingJob(jobId);
+  if (!job) {
+    localStorage.removeItem('drawingGenJobId');
+    return;
+  }
+  if (job.status === 'done') {
+    await finishDrawingJob(jobId, job.drawings || []);
+    return;
+  }
+  if (job.status === 'error') {
+    finishDrawingJobError({id: jobId, error: job.error});
+    return;
+  }
+  drawingJobAppliedId = null;
+  drawingJobStartedAt = Date.now() - 1000;
+  document.getElementById('generateDrawingsBtn').disabled = true;
+  drawingGenerationMessage('Генерация продолжается после обновления страницы…');
+  updateDrawingGenerationProgress(null, job.phase || 'BigPickle работает');
+  startDrawingJobPoll(jobId);
 }
 
 function montageOverlayDuration() {
@@ -2499,6 +2639,7 @@ function renderDrawingProposals() {
     <div class="drawing-proposal-preview">${drawingSvgMarkup(drawing.drawing)}</div>
     <strong>${esc(drawing.name)}</strong>
     <div class="toggle-desc">${esc(drawing.trigger_text || '')}</div>
+    ${drawing.rationale ? `<div class="drawing-proposal-why">${esc(drawing.rationale)}</div>` : ''}</div>
     <div class="drawing-proposal-fields">
       <input type="number" step="0.05" value="${drawing.start}" title="Начало" onchange="updatePendingDrawing(${index},'start',this.value)">
       <input type="number" step="0.05" value="${drawing.end}" title="Конец" onchange="updatePendingDrawing(${index},'end',this.value)">
@@ -2636,15 +2777,19 @@ function approvePendingDrawing(index) {
 
 async function generateMontageDrawings() {
   const button = document.getElementById('generateDrawingsBtn');
-  const status = document.getElementById('drawingGenerationStatus');
-  const payload = {};
-  const selectedFragments = selectedDrawingFragments();
-  if (selectedFragments === null) return;
-  if (!selectedFragments.length) {
-    montageError('Добавьте хотя бы одну реплику или отметьте фрагмент транскрипции');
-    return;
+  const mode = drawingGenerationMode();
+  const payload = {mode};
+  if (mode === 'manual') {
+    const selectedFragments = selectedDrawingFragments();
+    if (selectedFragments === null) return;
+    if (!selectedFragments.length) {
+      drawingGenerationMessage('Добавьте хотя бы одну реплику или отметьте фрагмент транскрипции', true);
+      return;
+    }
+    payload.selected_fragments = selectedFragments;
+  } else {
+    payload.selected_fragments = [];
   }
-  payload.selected_fragments = selectedFragments;
   if (selectedProjectId) payload.project_id = selectedProjectId;
   else if (transcriptJobId) payload.transcript_job_id = transcriptJobId;
   else {
@@ -2652,42 +2797,34 @@ async function generateMontageDrawings() {
     if (srt) payload.srt_text = await srt.text();
   }
   if (!payload.project_id && !payload.transcript_job_id && !payload.srt_text) {
-    montageError('Сначала выберите проект, транскрибацию или SRT');
+    drawingGenerationMessage('Сначала выберите проект, транскрибацию или SRT', true);
     return;
   }
-  const modeEl = document.getElementById('drawingGenMode');
-  payload.mode = modeEl && modeEl.value ? modeEl.value : 'manual';
+  const jobId = `dj-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  payload.job_id = jobId;
+  drawingJobAppliedId = null;
+  drawingJobStartedAt = Date.now();
+  localStorage.setItem('drawingGenJobId', jobId);
   button.disabled = true;
-  status.textContent = 'BigPickle анализирует транскрипцию и подбирает смысловые моменты...';
-  let progress = 5;
-  updateDrawingGenerationProgress(progress, 'Анализ транскрипции');
-  clearInterval(drawingProgressTimer);
-  drawingProgressTimer = setInterval(() => {
-    if (progress < 30) progress = Math.min(30, progress + 1.5);
-    else if (progress < 60) progress = Math.min(60, progress + 0.9);
-    else progress = Math.min(92, progress + 0.4);
-    const label = progress < 25 ? 'Анализ транскрипции' : progress < 55 ? 'Подбор смысловых моментов' : 'Создание схем';
-    updateDrawingGenerationProgress(progress, label);
-  }, 700);
+  drawingGenerationMessage(mode === 'auto'
+    ? 'BigPickle читает транскрипцию и предлагает 2–3 смысловые схемы…'
+    : 'BigPickle рисует схемы по выбранным заданиям…');
+  updateDrawingGenerationProgress(null, 'Анализ транскрипции');
+  startDrawingJobPoll(jobId);
   try {
     const response = await fetch('/api/montage/drawings/generate', {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
-    updateDrawingGenerationProgress(100, 'Готово');
-    proposalReviseText = [];
-    proposalRevising.clear();
-    pendingRevisionHistory.clear();
-    pendingDrawings = data.drawings || [];
-    renderDrawingProposals();
-    status.textContent = `Готово: ${pendingDrawings.length} ${pendingDrawings.length === 1 ? 'схема' : pendingDrawings.length < 5 ? 'схемы' : 'схем'}. Проверьте предложения перед добавлением на таймлайн.`;
+    await finishDrawingJob(jobId, data.drawings || []);
   } catch (error) {
+    const job = await fetchDrawingJob(jobId);
+    if (job) return; // задание живёт на сервере — статус доделает опрос
+    stopDrawingJobPoll();
+    localStorage.removeItem('drawingGenJobId');
     updateDrawingGenerationProgress(100, 'Ошибка генерации');
-    status.textContent = `Ошибка BigPickle: ${error.message}`;
-  } finally {
-    clearInterval(drawingProgressTimer);
-    drawingProgressTimer = null;
+    drawingGenerationMessage(`Ошибка: ${error.message}`, true);
     button.disabled = false;
   }
 }
@@ -3974,6 +4111,8 @@ updateSubtitlePreviewStyle();
 
 loadAnimationOptions();
 refreshProjects();
+applyDrawingGenMode();
+restoreDrawingGenerationJob();
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && montageJobId && document.getElementById('viewMontage').classList.contains('active')) {
     refreshMontageResult();

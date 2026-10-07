@@ -946,6 +946,30 @@ def _load_drawing_job(job_id: str) -> Optional[dict[str, Any]]:
     except Exception:
         return None
 
+
+def _recover_drawing_jobs() -> None:
+    """Восстанавливает задания генерации схем после перезапуска сервера."""
+    if not MONTAGE_WORK.is_dir():
+        return
+    for path in sorted(MONTAGE_WORK.glob("*/drawing_generation.json"))[-30:]:
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(job, dict) or not job.get("id"):
+            continue
+        if job.get("status") == "running":
+            job["status"] = "error"
+            job["phase"] = "Ошибка генерации"
+            job["indeterminate"] = False
+            job["progress"] = 100
+            job["error"] = "Генерация была прервана перезапуском сервера"
+            try:
+                path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                continue
+        _drawing_generation_jobs[str(job["id"])] = job
+
 app.mount("/animation-assets", StaticFiles(directory=str(montage_engine.ANIMATIONS_DIR)), name="animation-assets")
 app.mount("/font-assets", StaticFiles(directory=str(montage_engine.FONTS_DIR)), name="font-assets")
 
@@ -1248,6 +1272,7 @@ def _recover_montage_jobs() -> None:
 
 
 _recover_montage_jobs()
+_recover_drawing_jobs()
 
 
 def _threaded_progress(loop, job_id):
@@ -1701,31 +1726,6 @@ async def generate_montage_drawings(request: Request):
             duration_end = max(duration_end, float(item.get("end") or 0))
         except (TypeError, ValueError):
             pass
-    source_segments: list[dict[str, Any]] = []
-    transcript_job_id = str(payload.get("transcript_job_id") or "")
-    project_id = str(payload.get("project_id") or "")
-    if transcript_job_id:
-        source_job = jobs.get(transcript_job_id) or {}
-        if source_job.get("status") == "done" and isinstance(source_job.get("result"), list):
-            source_segments = source_job["result"]
-            transcript = montage_engine.build_words_srt(source_segments)
-    elif project_id:
-        async with PROJECTS_LOCK:
-            project = dict(PROJECTS.get(project_id) or {})
-        source_job = jobs.get(str(project.get("transcript_job_id") or "")) or {}
-        if source_job.get("status") == "done" and isinstance(source_job.get("result"), list):
-            source_segments = source_job["result"]
-            transcript = montage_engine.build_words_srt(source_segments)
-    if not transcript.strip():
-        raise HTTPException(400, "Сначала выберите транскрибацию или загрузите SRT")
-    if len(transcript) > 200_000:
-        raise HTTPException(400, "Транскрипция слишком большая")
-    duration_end = 0.0
-    for item in source_segments:
-        try:
-            duration_end = max(duration_end, float(item.get("end") or 0))
-        except (TypeError, ValueError):
-            pass
     if mode == "manual":
         if not isinstance(requested_fragments, list) or not requested_fragments:
             raise HTTPException(400, "Добавьте хотя бы одно задание для схемы")
@@ -1774,8 +1774,37 @@ async def generate_montage_drawings(request: Request):
             used_targets.add(target_id)
     else:
         selected_fragments = []
-    if mode == "auto":
-        try:
+    if mode == "manual" and not selected_fragments:
+        raise HTTPException(400, "Не осталось пригодных заданий для схем")
+    job_id = str(payload.get("job_id") or "").strip() or f"dj-{uuid.uuid4().hex[:12]}"
+    if not re.fullmatch(r"[\w-]{6,64}", job_id):
+        raise HTTPException(400, "Некорректный идентификатор задания")
+    job: dict[str, Any] = {
+        "id": job_id,
+        "mode": mode,
+        "status": "running",
+        "phase": "Анализ транскрипции",
+        "progress": 10,
+        "indeterminate": False,
+        "error": "",
+        "drawings": [],
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    _drawing_generation_jobs[job_id] = job
+    for old_id in [
+        key for key, value in _drawing_generation_jobs.items()
+        if value.get("status") in ("done", "error") and key != job_id
+    ][-10:]:
+        _drawing_generation_jobs.pop(old_id, None)
+    _save_drawing_job(job_id)
+
+    def _job_update(**fields: Any) -> None:
+        job.update(fields)
+        _save_drawing_job(job_id)
+
+    try:
+        _job_update(phase="BigPickle выбирает моменты и рисует схемы", progress=None, indeterminate=True)
+        if mode == "auto":
             async with _drawing_generation_lock:
                 drawings = await asyncio.to_thread(
                     drawing_generator.generate_smart_drawings,
@@ -1783,21 +1812,34 @@ async def generate_montage_drawings(request: Request):
                     source_segments or [],
                     3,
                 )
-        except Exception as exc:
-            raise HTTPException(502, f"Не удалось получить рисунки от BigPickle: {exc}")
-        return {"drawings": drawings}
-    if not selected_fragments:
-        raise HTTPException(400, "Не осталось пригодных заданий для схем")
-    try:
-        async with _drawing_generation_lock:
-            drawings = await asyncio.to_thread(
-                drawing_generator.generate_drawings,
-                transcript,
-                selected_fragments,
-            )
+        else:
+            async with _drawing_generation_lock:
+                drawings = await asyncio.to_thread(
+                    drawing_generator.generate_drawings,
+                    transcript,
+                    selected_fragments,
+                )
+        _job_update(phase="Проверка и сохранение схем", progress=90, indeterminate=False)
+        if not drawings:
+            raise ValueError("BigPickle не предложил ни одной схемы")
+        job["drawings"] = drawings
+        _job_update(status="done", phase="Готово", progress=100, drawings=drawings)
     except Exception as exc:
+        _job_update(status="error", phase="Ошибка генерации", progress=100, indeterminate=False, error=str(exc))
+        _drawing_generation_jobs.pop(job_id, None)
         raise HTTPException(502, f"Не удалось получить рисунки от BigPickle: {exc}")
-    return {"drawings": drawings}
+    return {"drawings": drawings, "job_id": job_id}
+
+
+@app.get("/api/montage/drawings/status")
+async def montage_drawing_job_status(request: Request, job_id: str = ""):
+    client_host = request.client.host if request.client else ""
+    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(403, "Статус генерации доступен только локально")
+    job = _drawing_generation_jobs.get(job_id) or _load_drawing_job(job_id)
+    if not isinstance(job, dict):
+        raise HTTPException(404, "Задание генерации не найдено")
+    return job
 
 
 @app.post("/api/montage/drawings/revise")

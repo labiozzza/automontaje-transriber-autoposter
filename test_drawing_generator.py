@@ -1,3 +1,5 @@
+import json
+import shutil
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -7,6 +9,8 @@ from fastapi import HTTPException
 from montage.drawing_generator import (
     classify_request,
     generate_drawings,
+    generate_smart_drawings,
+    parse_srt_segments,
     revise_drawing,
     validate_drawing_overlay,
 )
@@ -340,6 +344,152 @@ class DrawingRevisionTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as raised:
             __import__("asyncio").run(app.revise_montage_drawing(Request()))
         self.assertEqual(raised.exception.status_code, 403)
+
+
+class DrawingGenerationJobTests(unittest.TestCase):
+    """Режим авто-подбора: без выбранных фрагментов, честный статус, восстановление."""
+
+    JOB_IDS = ("dj-test-auto-mode", "dj-test-smart-err", "dj-test-status-job", "dj-test-recover")
+
+    def tearDown(self):
+        for job_id in self.JOB_IDS:
+            app._drawing_generation_jobs.pop(job_id, None)
+            shutil.rmtree(app.MONTAGE_WORK / job_id, ignore_errors=True)
+
+    @staticmethod
+    def _request(payload, host="127.0.0.1"):
+        class Request:
+            client = SimpleNamespace(host=host)
+            headers = {"origin": "http://127.0.0.1:8000"}
+
+            async def json(self):
+                return payload
+        return Request()
+
+    @staticmethod
+    def _proposal(start=1.0, end=3.0):
+        return validate_drawing_overlay({
+            "start": start, "end": end,
+            "drawing": {"paths": [{"points": [[0, 0], [10, 10]]}]},
+        })
+
+    def test_auto_mode_starts_without_selected_fragments(self):
+        payload = {
+            "mode": "auto",
+            "job_id": "dj-test-auto-mode",
+            "srt_text": "1\n00:00:00,000 --> 00:00:04,000\nПроцесс обучения нейросети.\n",
+            "selected_fragments": [],
+        }
+        with mock.patch.object(app.drawing_generator, "generate_smart_drawings", return_value=[self._proposal()]) as smart:
+            response = __import__("asyncio").run(app.generate_montage_drawings(self._request(payload)))
+        self.assertEqual(len(response["drawings"]), 1)
+        self.assertIn("Процесс обучения нейросети", smart.call_args.args[0])
+        job = app._drawing_generation_jobs["dj-test-auto-mode"]
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["progress"], 100)
+        self.assertEqual(job["drawings"], response["drawings"])
+        stored = app._load_drawing_job("dj-test-auto-mode")
+        self.assertEqual(stored["status"], "done")
+
+    def test_manual_mode_still_requires_fragments(self):
+        payload = {"mode": "manual", "job_id": "dj-test-auto-mode", "srt_text": "Ку-ку.\n", "selected_fragments": []}
+        with self.assertRaises(HTTPException) as raised:
+            __import__("asyncio").run(app.generate_montage_drawings(self._request(payload)))
+        self.assertEqual(raised.exception.status_code, 400)
+
+    def test_status_endpoint_returns_saved_job(self):
+        app._drawing_generation_jobs["dj-test-status-job"] = {
+            "id": "dj-test-status-job", "status": "done", "progress": 100, "drawings": [],
+        }
+        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+        job = __import__("asyncio").run(
+            app.montage_drawing_job_status(request, job_id="dj-test-status-job")
+        )
+        self.assertEqual(job["status"], "done")
+
+    def test_generation_error_is_recorded_in_job(self):
+        payload = {
+            "mode": "auto",
+            "job_id": "dj-test-smart-err",
+            "srt_text": "1\n00:00:00,000 --> 00:00:04,000\nТекст.\n",
+            "selected_fragments": [],
+        }
+        with mock.patch.object(app.drawing_generator, "generate_smart_drawings", side_effect=RuntimeError("модель упала")):
+            with self.assertRaises(HTTPException) as raised:
+                __import__("asyncio").run(app.generate_montage_drawings(self._request(payload)))
+        self.assertEqual(raised.exception.status_code, 502)
+        stored = app._load_drawing_job("dj-test-smart-err")
+        self.assertEqual(stored["status"], "error")
+        self.assertIn("модель упала", stored["error"])
+
+    def test_recover_marks_interrupted_job_as_error(self):
+        path = app.MONTAGE_WORK / "dj-test-recover" / "drawing_generation.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"id": "dj-test-recover", "status": "running", "phase": "Анализ"}), encoding="utf-8")
+        app._recover_drawing_jobs()
+        job = app._drawing_generation_jobs["dj-test-recover"]
+        self.assertEqual(job["status"], "error")
+        self.assertIn("перезапуском", job["error"])
+
+
+class SmartDrawingSelectionTests(unittest.TestCase):
+    def test_segments_to_phrases_merges_word_segments(self):
+        segments = [
+            {"start": index * 0.4, "end": index * 0.4 + 0.4, "text": word}
+            for index, word in enumerate(["Привет", "мир", "это", "тест"])
+        ]
+        phrases = app_chart._segments_to_phrases(segments)
+        self.assertEqual(len(phrases), 1)
+        self.assertEqual(phrases[0]["text"], "Привет мир это тест")
+        self.assertEqual((phrases[0]["start"], phrases[0]["end"]), (0.0, 1.6))
+
+    def test_segments_to_phrases_starts_new_phrase_after_long_pause(self):
+        segments = [
+            {"start": 0.0, "end": 1.0, "text": "Первая мысль"},
+            {"start": 6.0, "end": 7.0, "text": "Вторая мысль"},
+        ]
+        phrases = app_chart._segments_to_phrases(segments)
+        self.assertEqual([p["text"] for p in phrases], ["Первая мысль", "Вторая мысль"])
+
+    def test_parse_srt_segments(self):
+        srt = (
+            "1\n00:00:01,000 --> 00:00:03,500\nПервая фраза\n\n"
+            "2\n00:00:04,000 --> 00:00:06,250\nВторая фраза\n"
+        )
+        segments = parse_srt_segments(srt)
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0], {"start": 1.0, "end": 3.5, "text": "Первая фраза"})
+        self.assertEqual(segments[1], {"start": 4.0, "end": 6.25, "text": "Вторая фраза"})
+
+    @staticmethod
+    def _suggestion(text, start, end):
+        return {
+            "text": text, "start": start, "end": end, "name": text, "rationale": "почему-то",
+            "drawing": {"width": 1000, "height": 1000, "paths": [{"points": [[100, 100], [900, 400]]}]},
+        }
+
+    def test_smart_drawings_skip_overlap_and_tail_outside_video(self):
+        suggestions = [
+            self._suggestion("Первый момент", 0.5, 3.0),
+            self._suggestion("Наложение", 1.0, 2.0),
+            self._suggestion("После конца ролика", 40.0, 44.0),
+        ]
+        segments = [{"start": 0.0, "end": 10.0, "text": "Смысловая фраза."}]
+        with mock.patch("montage.drawing_generator.ask_json", return_value={"suggestions": suggestions}):
+            drawings = generate_smart_drawings("Транскрипция целиком", segments, 3)
+        self.assertEqual(len(drawings), 1)
+        self.assertEqual(drawings[0]["trigger_text"], "Первый момент")
+        self.assertEqual(drawings[0]["rationale"], "почему-то")
+        self.assertLessEqual(drawings[0]["end"], 10.0)
+
+    def test_smart_drawings_without_segments_parse_srt(self):
+        suggestions = [self._suggestion("Момент", 0.0, 2.0)]
+        srt = "1\n00:00:00,000 --> 00:00:05,000\nФраза.\n"
+        with mock.patch("montage.drawing_generator.ask_json", return_value={"suggestions": suggestions}) as ask:
+            drawings = generate_smart_drawings(srt, [], 3)
+        self.assertEqual(len(drawings), 1)
+        self.assertIn("ФРАЗЫ", ask.call_args.args[0])
+        self.assertIn("Фраза.", ask.call_args.args[0])
 
 
 if __name__ == "__main__":

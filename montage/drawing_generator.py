@@ -314,12 +314,68 @@ def generate_drawings(transcript: str, selected_fragments: list[dict[str, Any]])
             continue
     return drawings
 
+_SRT_TIME_RE = re.compile(
+    r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})"
+)
+
+
+def _srt_timestamp_to_seconds(match: Any, offset: int) -> float:
+    hours, minutes, seconds, millis = (
+        int(match.group(offset + 1)),
+        int(match.group(offset + 2)),
+        int(match.group(offset + 3)),
+        int(match.group(offset + 4)),
+    )
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
+
+
+def parse_srt_segments(text: str) -> list[dict[str, Any]]:
+    """Разбирает обычный SRT в сегменты с временем для автоподбора схем."""
+    segments: list[dict[str, Any]] = []
+    if not text or not text.strip():
+        return segments
+    for block in re.split(r"\n\s*\n", text.replace("\r\n", "\n").strip()):
+        lines = [line.strip() for line in block.split("\n") if line.strip()]
+        if not lines:
+            continue
+        stamp_index = None
+        match = None
+        for index, line in enumerate(lines):
+            found = _SRT_TIME_RE.search(line)
+            if found:
+                stamp_index = index
+                match = found
+                break
+        if match is None or stamp_index is None:
+            continue
+        body = " ".join(lines[stamp_index + 1:]).strip()
+        if not body:
+            continue
+        try:
+            start = _srt_timestamp_to_seconds(match, 0)
+            end = _srt_timestamp_to_seconds(match, 4)
+        except (ValueError, AttributeError):
+            continue
+        if end < start:
+            start, end = end, start
+        segments.append({"start": round(start, 3), "end": round(end, 3), "text": body[:400]})
+    return segments
+
+
 def generate_smart_drawings(transcript: str, segments: list[dict[str, Any]], max_drawings: int = 3) -> list[dict[str, Any]]:
     transcript = transcript.strip()
     if not transcript:
         raise ValueError("Транскрипция пуста")
+    if not segments:
+        segments = parse_srt_segments(transcript)
     phrases = _segments_to_phrases(segments)
     context_phrases = phrases[:40]
+    video_end = 0.0
+    for item in segments:
+        try:
+            video_end = max(video_end, float(item.get("end") or 0))
+        except (TypeError, ValueError):
+            continue
     prompt = (
         "Ты — редактор схем для вертикального ролика. Твоя задача: выбрать 2–3 СМЫСЛОВЫХ момента в транскрипции "
         "и предложить простые объясняющие схемы (drawing) для каждого.\n"
@@ -338,7 +394,10 @@ def generate_smart_drawings(transcript: str, segments: list[dict[str, Any]], max
     if not isinstance(suggestions, list):
         raise ValueError("BigPickle не вернул предложения")
     drawings: list[dict[str, Any]] = []
-    for idx, s in enumerate(suggestions[:max_drawings]):
+    used_intervals: list[tuple[float, float]] = []
+    for idx, s in enumerate(suggestions[:max_drawings * 2]):
+        if len(drawings) >= max_drawings:
+            break
         if not isinstance(s, dict):
             continue
         text = str(s.get("text") or "").strip()[:500]
@@ -349,9 +408,24 @@ def generate_smart_drawings(transcript: str, segments: list[dict[str, Any]], max
             end = float(s.get("end") or start + 0.8)
         except Exception:
             continue
+        if start < 0:
+            start = 0.0
+        if end <= start:
+            end = start + 1.5
+        if video_end:
+            if start >= video_end - 0.4:
+                continue
+            end = min(end, video_end)
+        if end < start + 0.5:
+            end = start + 0.5
+        overlaps = any(start < used_end and end > used_start for used_start, used_end in used_intervals)
+        if overlaps:
+            continue
         d = s.get("drawing") or {}
         viz = s.get("viz")
         name = str(s.get("name") or "Схема")
+        rationale = str(s.get("rationale") or "").strip()[:300]
+        drawing_type = str(s.get("drawing_type") or "").strip()[:40]
         overlay = {
             "name": name,
             "start": round(max(0, start), 3),
@@ -368,16 +442,24 @@ def generate_smart_drawings(transcript: str, segments: list[dict[str, Any]], max
             validated = validate_drawing_overlay(overlay, idx)
         except Exception:
             continue
+        if rationale:
+            validated["rationale"] = rationale
+        if drawing_type:
+            validated["drawing_type"] = drawing_type
+        used_intervals.append((validated["start"], validated["end"]))
         drawings.append(validated)
     return drawings
 
 
-def _segments_to_phrases(segments: list[dict[str, Any]], max_segments: int = 200) -> list[dict[str, Any]]:
+def _segments_to_phrases(
+    segments: list[dict[str, Any]],
+    max_segments: int = 100_000,
+    max_phrases: int = 60,
+) -> list[dict[str, Any]]:
     phrases: list[dict[str, Any]] = []
     current_text = ""
     current_start = 0.0
     current_end = 0.0
-    count = 0
     for seg in segments[:max_segments]:
         try:
             s = float(seg.get("start") or 0)
@@ -390,16 +472,18 @@ def _segments_to_phrases(segments: list[dict[str, Any]], max_segments: int = 200
         if not current_text:
             current_text, current_start, current_end = t, s, e
             continue
-        if t.endswith(('.', '!', '?', '…')) or len(current_text) > 120:
-            phrases.append({"text": current_text, "start": current_start, "end": current_end})
+        if s - current_end > 2.5 or t.endswith(('.', '!', '?', '…')) or len(current_text) > 120:
+            phrases.append({"text": current_text, "start": round(current_start, 3), "end": round(current_end, 3)})
             current_text, current_start, current_end = t, s, e
         else:
             current_text = (current_text + " " + t).strip()
             current_end = max(current_end, e)
-        count += 1
     if current_text:
-        phrases.append({"text": current_text, "start": current_start, "end": current_end})
-    return phrases[:60]
+        phrases.append({"text": current_text, "start": round(current_start, 3), "end": round(current_end, 3)})
+    if len(phrases) <= max_phrases:
+        return phrases
+    step = len(phrases) / max_phrases
+    return [phrases[min(len(phrases) - 1, int(index * step))] for index in range(max_phrases)]
 
 
 def revise_drawing(overlay: dict[str, Any], instruction: str, index: int = 0) -> dict[str, Any]:
