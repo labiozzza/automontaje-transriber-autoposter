@@ -378,7 +378,7 @@ def generate_smart_drawings(
     if not segments:
         segments = parse_srt_segments(transcript)
     phrases = _segments_to_phrases(segments)
-    context_phrases = phrases[:40]
+    context_phrases = phrases[:32]
     video_end = 0.0
     for item in segments:
         try:
@@ -390,13 +390,14 @@ def generate_smart_drawings(
         "и предложить простые объясняющие схемы (drawing) для каждого.\n"
         "Критерии: важный переход/сравнение/процесс/причина-следствие, моменты равномерно распределены по ролику, "
         "не предлагай одно слово, бери законченную мысль. Максимум 3 схемы.\n"
-        "Рисуй в координатах 0..1000, 6-20 путей, 40-250 точек, простые формы, стрелки по делу. "
+        "Рисуй в координатах 0..1000: обычно 3-10 путей и 3-30 точек на путь, прямые линии — ровно 2 точки. "
+        "Простые формы, стрелки только по делу. "
         "Для графиков рисуй ТОЛЬКО данные (оси нарисует система). Человек — аккуратный стикмен, без реалистичной анатомии.\n"
         "Верни СТРОГО JSON без markdown:\n"
         '{"suggestions":[{"text":"фраза","start":0.0,"end":2.5,"name":"название схемы",'
         '"rationale":"почему","drawing_type":"process","drawing":{"width":1000,"height":1000,'
         '"paths":[{"points":[[100,200],[200,150]],"stroke":"#FFFFFF","stroke_width":10}]}]}\n\n'
-        "ФРАЗЫ:\n" + json.dumps(context_phrases, ensure_ascii=False) + "\n\nТРАНСКРИПЦИЯ (контекст):\n" + transcript[:20000]
+        "ФРАЗЫ:\n" + json.dumps(context_phrases, ensure_ascii=False) + "\n\nТРАНСКРИПЦИЯ (контекст):\n" + transcript[:12000]
     )
     response = ask_json(prompt, model="opencode/big-pickle", progress_callback=progress_callback)
     suggestions = response.get("suggestions")

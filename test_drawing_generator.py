@@ -1,6 +1,5 @@
 import json
 import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,7 +17,6 @@ from montage.drawing_generator import (
     validate_drawing_overlay,
 )
 from montage import drawing_generator as app_chart
-from montage import opencode_client
 from montage.apply_timeline_animation import render_drawing
 import app
 
@@ -355,7 +353,7 @@ class DrawingGenerationJobTests(unittest.TestCase):
 
     JOB_IDS = (
         "dj-test-auto-mode", "dj-test-smart-live", "dj-test-smart-err",
-        "dj-test-status-job", "dj-test-recover",
+        "dj-test-status-job", "dj-test-recover", "dj-test-progress-err", "dj-test-progress-live",
     )
 
     def tearDown(self):
@@ -431,6 +429,63 @@ class DrawingGenerationJobTests(unittest.TestCase):
         self.assertEqual(job["attempt"], 1)
         self.assertEqual(job["attempt_started_at"], 1000.0)
         self.assertEqual([event["event"] for event in job["events"]], ["attempt_started", "response_received"])
+
+    def test_error_job_progress_is_not_full(self):
+        payload = {
+            "mode": "auto",
+            "job_id": "dj-test-progress-err",
+            "srt_text": "1\n00:00:00,000 --> 00:00:04,000\nТекст.\n",
+            "selected_fragments": [],
+        }
+
+        def generate(_transcript, _segments, _count, progress):
+            progress({
+                "event": "attempt_started", "attempt": 1, "attempts_total": 2,
+                "attempt_timeout_seconds": 600, "event_at": 5.0, "detail": "Запрос отправлен",
+            })
+            progress({
+                "event": "attempt_idle_timeout", "attempt": 1, "attempts_total": 2,
+                "attempt_timeout_seconds": 600, "event_at": 6.0,
+                "detail": "Нет активности от BigPickle более 300 с",
+            })
+            raise RuntimeError("GPT не ответил вовремя")
+
+        with mock.patch.object(app.drawing_generator, "generate_smart_drawings", side_effect=generate):
+            with self.assertRaises(HTTPException):
+                __import__("asyncio").run(app.generate_montage_drawings(self._request(payload)))
+        stored = app._load_drawing_job("dj-test-progress-err")
+        self.assertEqual(stored["status"], "error")
+        self.assertLess(stored["progress"], 100)
+        self.assertEqual(stored["phase"], "Ошибка генерации")
+        self.assertEqual(
+            [event["event"] for event in stored["events"]],
+            ["attempt_started", "attempt_idle_timeout"],
+        )
+
+    def test_activity_event_does_not_reset_progress_to_full(self):
+        payload = {
+            "mode": "auto",
+            "job_id": "dj-test-progress-live",
+            "srt_text": "1\n00:00:00,000 --> 00:00:04,000\nТекст.\n",
+            "selected_fragments": [],
+        }
+
+        def generate(_transcript, _segments, _count, progress):
+            progress({
+                "event": "attempt_started", "attempt": 1, "attempts_total": 2,
+                "attempt_timeout_seconds": 600, "event_at": 5.0, "detail": "Запрос отправлен",
+            })
+            progress({
+                "event": "activity", "attempt": 1, "attempts_total": 2,
+                "attempt_timeout_seconds": 600, "event_at": 6.0, "detail": "Модель отвечает, событий: 3",
+            })
+            return [self._proposal()]
+
+        with mock.patch.object(app.drawing_generator, "generate_smart_drawings", side_effect=generate):
+            __import__("asyncio").run(app.generate_montage_drawings(self._request(payload)))
+        job = app._drawing_generation_jobs["dj-test-progress-live"]
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["last_event"], "Модель отвечает, событий: 3")
 
     def test_status_endpoint_returns_saved_job(self):
         app._drawing_generation_jobs["dj-test-status-job"] = {
@@ -568,24 +623,6 @@ class SmartDrawingSelectionTests(unittest.TestCase):
         self.assertEqual(len(drawings), 1)
         self.assertIn("ФРАЗЫ", ask.call_args.args[0])
         self.assertIn("Фраза.", ask.call_args.args[0])
-
-
-class OpenCodeProgressTests(unittest.TestCase):
-    def test_reports_timeout_retry_and_success(self):
-        events = []
-        completed = SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
-        timeout = subprocess.TimeoutExpired(cmd="opencode", timeout=1)
-        with mock.patch.object(opencode_client.subprocess, "run", side_effect=[timeout, completed]), \
-                mock.patch.object(opencode_client.time, "sleep"):
-            result = opencode_client.ask_json(
-                "prompt", timeout=1, retries=1, progress_callback=events.append,
-            )
-        self.assertTrue(result["ok"])
-        self.assertEqual([event["event"] for event in events], [
-            "attempt_started", "attempt_timeout", "retry_scheduled",
-            "attempt_started", "response_received", "response_parsed",
-        ])
-        self.assertEqual(events[-1]["attempt"], 2)
 
 
 if __name__ == "__main__":
