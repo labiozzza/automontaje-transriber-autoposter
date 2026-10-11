@@ -1381,6 +1381,16 @@ select option { background: var(--surface2); }
         </div>
         <div class="toggle-row">
           <div>
+            <div class="toggle-label">Сразу подготовить отражённую версию</div>
+            <div class="toggle-desc">Отражённый вариант соберётся на этапе монтажа и будет готов к публикации; иначе создайте его отдельной кнопкой в разделе результата</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="montagePrepareMirrored">
+            <div class="toggle-slider"></div>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <div>
             <div class="toggle-label">Предложить обложку</div>
             <div class="toggle-desc">BigPickle придумает 4 заголовка, изображения соберутся локально; ручной заголовок добавит пятый вариант</div>
             <input id="montageAutoCoverTitle" maxlength="100" placeholder="Свой заголовок для пятой обложки (необязательно)" style="margin-top:8px">
@@ -1478,6 +1488,10 @@ select option { background: var(--surface2); }
           <div class="card-title" style="margin-top:20px">Публикация</div>
           <button class="btn btn-primary" id="openPublishWindowBtn" disabled onclick="openPublishWindow()">Открыть окно публикации</button>
           <div class="publish-results" id="montagePublishResults"></div>
+
+          <div class="card-title" style="margin-top:20px">Отражённая версия</div>
+          <div id="montageMirrorVariantInfo" style="font-size:13px;color:var(--text2)">Не подготовлена</div>
+          <button class="btn" id="prepareMirrorBtn" disabled onclick="prepareMirrorVariant()">Подготовить отражённую версию</button>
         </div>
       </div>
     </section>
@@ -1490,12 +1504,13 @@ select option { background: var(--surface2); }
         </div>
         <div class="publish-target-grid">
           <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="instagram_trial"> Instagram пробное</label>
-          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="instagram_trial_mirrored"> Instagram пробное перевёрнутое</label>
+          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox publish-mirror-target" value="instagram_trial_mirrored"> Instagram пробное перевёрнутое</label>
           <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="instagram_feed"> Instagram основная лента</label>
-          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="instagram_feed_mirrored"> Instagram основная лента перевёрнутое</label>
+          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox publish-mirror-target" value="instagram_feed_mirrored"> Instagram основная лента перевёрнутое</label>
           <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="youtube"> YouTube</label>
-          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox" value="youtube_mirrored"> YouTube перевёрнутое</label>
+          <label class="publish-target"><input type="checkbox" class="publish-target-checkbox publish-mirror-target" value="youtube_mirrored"> YouTube перевёрнутое</label>
         </div>
+        <div class="error-box" id="montageMirrorPublishNotice" style="display:none"></div>
         <div class="publish-field">
           <div class="publish-field-head"><label for="montagePublishTitle">Заголовок для YouTube</label><span id="montagePublishTitleCount">0 / 119</span></div>
           <input id="montagePublishTitle" maxlength="119" placeholder="Обязателен, если выбран YouTube" oninput="updatePublishCounts()">
@@ -2566,6 +2581,7 @@ function pushDrawingsOpsState(jobOrState) {
   else pct = Number(state.progress) || 0;
   mergeOpsState({ drawings: {
     status: status, progress: pct, detail: state.detail || '', error: state.error || '',
+    stages: state.stages || [],
   }});
   renderOperations(window.__opsState);
 }
@@ -2628,22 +2644,25 @@ function drawingJobDetail(job) {
   const elapsed = Math.max(0, now - created);
   const attempt = Number(job.attempt) || 0;
   const total = Number(job.attempts_total) || 2;
-  const timeout = Number(job.attempt_timeout_seconds) || 240;
+  const timeout = Number(job.attempt_timeout_seconds) || 600;
   const attemptStarted = Number(job.attempt_started_at) || 0;
+  const stages = Array.isArray(job.stages) ? job.stages : [];
+  const totalStages = stages.length || 8;
+  const completed = stages.filter(s => s.status === 'completed').length;
+  const running = stages.find(s => s.status === 'running');
+  const percent = stages.length ? Math.min(95, Math.round(completed / totalStages * 100)) : null;
+  const bits = [`Прошло ${formatDrawingJobTime(elapsed)}`];
+  bits.push(`этап ${Math.min(completed + (running ? 1 : 0), totalStages)} из ${totalStages}`);
+  if (running && running.label) bits.push(running.label.toLowerCase());
   if (!attempt || !attemptStarted) {
-    return {percent: 10, text: `Прошло ${formatDrawingJobTime(elapsed)} · ожидаем свободный слот для модели`};
+    bits.push('ожидаем свободный слот для модели');
+  } else {
+    bits.push(`попытка ${attempt} из ${total}`);
+    const attemptElapsed = Math.max(0, now - attemptStarted);
+    const attemptRemaining = Math.max(0, timeout - attemptElapsed);
+    bits.push(`до таймаута ${formatDrawingJobTime(attemptRemaining)}`);
   }
-  const attemptElapsed = Math.max(0, now - attemptStarted);
-  const attemptRemaining = Math.max(0, timeout - attemptElapsed);
-  const maximumRemaining = Math.max(0, attemptRemaining + (total - attempt) * timeout);
-  const consumedBudget = Math.min(total * timeout, (attempt - 1) * timeout + attemptElapsed);
-  const percent = 10 + 75 * consumedBudget / (total * timeout);
-  const timedOut = (job.events || []).some(item => item.event === 'attempt_timeout');
-  const retryNote = timedOut && attempt > 1 ? ' · предыдущая попытка превысила лимит' : '';
-  return {
-    percent,
-    text: `Прошло ${formatDrawingJobTime(elapsed)} · попытка ${attempt} из ${total} · до таймаута ${formatDrawingJobTime(attemptRemaining)} · результат или ошибка максимум через ${formatDrawingJobTime(maximumRemaining)}${retryNote}`,
-  };
+  return {percent, text: bits.join(' · ')};
 }
 
 async function fetchDrawingJob(jobId) {
@@ -2686,10 +2705,12 @@ function finishDrawingJobError(job) {
   if (drawingJobAppliedId === job.id) return;
   drawingJobAppliedId = job.id;
   if (localStorage.getItem('drawingGenJobId') === job.id) localStorage.removeItem('drawingGenJobId');
+  const lastPercent = Number(drawingJobLastStatus && drawingJobLastStatus.progress);
   stopDrawingJobPoll();
-  updateDrawingGenerationProgress(100, 'Ошибка генерации');
+  const shown = Number.isFinite(lastPercent) ? clamp(lastPercent, 0, 95) : 0;
+  updateDrawingGenerationProgress(shown, 'Ошибка генерации', false);
   document.getElementById('drawingGenerationProgressDetail').textContent = job.last_event || '';
-  pushDrawingsOpsState({status: 'error', progress: 0, detail: job.error || 'Неизвестная ошибка'});
+  pushDrawingsOpsState({status: 'error', progress: shown, detail: job.error || 'Неизвестная ошибка', stages: job.stages || []});
   drawingGenerationMessage(`Ошибка BigPickle: ${job.error || 'неизвестная ошибка'}`, true);
   document.getElementById('generateDrawingsBtn').disabled = false;
 }
@@ -2706,11 +2727,9 @@ function applyDrawingJobStatus(job) {
   }
   drawingJobLastStatus = job;
   const live = drawingJobDetail(job);
-  const received = (job.events || []).some(item => item.event === 'response_received');
-  const percent = received ? 90 : live.percent;
-  updateDrawingGenerationProgress(percent, job.phase || 'Подготовка');
+  updateDrawingGenerationProgress(live.percent, job.phase || 'Подготовка');
   document.getElementById('drawingGenerationProgressDetail').textContent = live.text;
-  pushDrawingsOpsState({status: 'running', progress: percent, detail: live.text});
+  pushDrawingsOpsState({status: 'running', progress: live.percent, detail: live.text, stages: job.stages || []});
 }
 
 function startDrawingJobPoll(jobId) {
@@ -2744,7 +2763,7 @@ async function restoreDrawingGenerationJob() {
     return;
   }
   if (job.status === 'error') {
-    finishDrawingJobError({id: jobId, error: job.error});
+    finishDrawingJobError(job);
     return;
   }
   drawingJobAppliedId = null;
@@ -3024,7 +3043,7 @@ async function generateMontageDrawings() {
     if (job) return; // задание живёт на сервере — статус доделает опрос
     stopDrawingJobPoll();
     localStorage.removeItem('drawingGenJobId');
-    updateDrawingGenerationProgress(100, 'Ошибка генерации');
+    updateDrawingGenerationProgress(null, 'Ошибка генерации', false);
     drawingGenerationMessage(`Ошибка: ${error.message}`, true);
     button.disabled = false;
   }
@@ -3788,6 +3807,7 @@ async function startMontage() {
   form.append('face_tracking', document.getElementById('montageFaceTrack').checked);
   form.append('autozoom', document.getElementById('montageAutozoom').checked);
   form.append('mirror_horizontal', document.getElementById('montageMirrorHorizontal').checked);
+  form.append('prepare_mirrored', document.getElementById('montagePrepareMirrored').checked);
   form.append('blur_banned_words', document.getElementById('montageBlurBannedWords').checked);
   form.append('propose_cover', document.getElementById('montageProposeCover').checked);
   form.append('cover_title', document.getElementById('montageAutoCoverTitle').value.trim());
@@ -3976,16 +3996,21 @@ function opsOpBlock(op) {
   if (op.targets && op.targets.length) {
     html += '<div style="margin-top:6px">' + op.targets.map(function(t) {
       const td = t.status === 'done' ? 'done' : (t.status === 'error' ? 'fail' : (t.status === 'unknown' ? 'warn' : (t.status === 'queued' ? '' : 'running')));
-      return '<div class="ops-stage"><span class="dot ' + td + '"></span>'
+      let row = '<div class="ops-stage"><span class="dot ' + td + '"></span>'
         + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(t.label || t.id) + '</span>'
         + '<span style="color:var(--text2);font-size:12px">' + esc(t.detail || opStatusLabel(t.status)) + '</span></div>';
+      if (t.steps && t.steps.length) {
+        row += '<div style="margin:4px 0 8px 14px">' + t.steps.map(opsStageRow).join('') + '</div>';
+      }
+      return row;
     }).join('') + '</div>';
   }
   return html + '</div>';
 }
 
 function targetProgressPercent(target) {
-  if (target.status === 'done' || target.status === 'error') return 100;
+  if (target.status === 'done') return 100;
+  if (target.status === 'error') return null;
   if (target.status === 'unknown') return null;
   if (target.progress != null) return Number(target.progress) || 0;
   if (target.status === 'queued' || target.status === 'preparing' || target.status === 'publishing') return null;
@@ -4028,7 +4053,16 @@ function buildOpsState(state) {
     const d = state.drawings;
     ops.push({ key: 'drawings', label: 'Схемы', status: d.status,
       progress: d.progress === null || d.progress === undefined ? null : Number(d.progress) || 0,
-      detail: d.detail || '', error: d.error || '', warning: '', stages: null });
+      detail: d.detail || '', error: d.error || '', warning: '', stages: d.stages || [] });
+  }
+  const mv = state.mirror_variant;
+  if (mv && ['generating', 'done', 'error'].includes(mv.status)) {
+    ops.push({ key: 'mirror_variant', label: 'Отражённая версия', status: mv.status,
+      progress: mv.progress === null || mv.progress === undefined
+        ? (mv.status === 'generating' ? null : Number(mv.progress) || 0)
+        : Number(mv.progress) || 0,
+      detail: mv.detail || (mv.status === 'generating' ? 'Подготовка отражённой версии' : ''),
+      error: mv.error || '', warning: '', stages: null });
   }
   if (state.publish_progress) {
     const targets = Object.values(state.publish_progress);
@@ -4057,7 +4091,7 @@ function buildOpsState(state) {
 const OPS_ACTIVE_STATUSES = ['publishing', 'preparing', 'processing', 'running', 'generating', 'queued', 'partial', 'needs_check', 'unknown', 'error'];
 function pickMainOp(ops) {
   if (!ops.length) return null;
-  const order = ['publish', 'montage', 'covers', 'drawings'];
+  const order = ['publish', 'mirror_variant', 'montage', 'covers', 'drawings'];
   for (const key of order) {
     const op = ops.find(function(o) { return o.key === key; });
     if (op && OPS_ACTIVE_STATUSES.includes(op.status)) return op;
@@ -4070,7 +4104,7 @@ function pickMainOp(ops) {
 function opsBodySignature(ops) {
   return ops.map(function(o) {
     const stages = (o.stages || []).map(function(s) { return s.key + s.status + (s.progress == null ? 'x' : Math.round(s.progress)); }).join(',');
-    const targets = (o.targets || []).map(function(t) { return t.id + t.status + (t.progress == null ? 'x' : Math.round(t.progress)); }).join(',');
+    const targets = (o.targets || []).map(function(t) { return t.id + t.status + (t.progress == null ? 'x' : Math.round(t.progress)) + ':' + (t.steps || []).map(function(s) { return s.key + s.status; }).join(','); }).join(',');
     return o.key + o.status + Math.round(o.progress == null ? -1 : o.progress) + '|' + stages + '|' + targets + '|' + (o.warning ? 'w' : '');
   }).join('||');
 }
@@ -4140,6 +4174,61 @@ function montageUpdateProgress(progress, stage, detail, refreshAfterTerminal = t
   }
 }
 
+function mirrorVariantReady() {
+  const vs = window.__opsState && window.__opsState.variants;
+  return !!(vs && vs.mirrored_ready);
+}
+
+function applyMirrorVariantState(data) {
+  const info = document.getElementById('montageMirrorVariantInfo');
+  const btn = document.getElementById('prepareMirrorBtn');
+  const notice = document.getElementById('montageMirrorPublishNotice');
+  const mv = (data && data.mirror_variant) || (window.__opsState && window.__opsState.mirror_variant) || null;
+  const ready = !!(data && data.variants && data.variants.mirrored_ready) || mirrorVariantReady();
+  const status = mv && mv.status ? mv.status : (ready ? 'done' : 'idle');
+  const hasResult = !!(data && data.result) || !!(window.__opsState && window.__opsState.result);
+  if (info) {
+    if (status === 'generating') info.textContent = 'Подготовка… ' + Math.round(Number(mv && mv.progress) || 0) + '%';
+    else if (status === 'done' || ready) info.textContent = 'Готова к публикации';
+    else if (status === 'error') info.textContent = 'Ошибка: ' + ((mv && mv.error) || 'не удалось подготовить');
+    else info.textContent = 'Не подготовлена';
+  }
+  if (btn) btn.disabled = !hasResult || status === 'generating' || ready;
+  const mirrorBoxes = document.querySelectorAll('.publish-mirror-target');
+  mirrorBoxes.forEach(function(box) {
+    box.disabled = !ready;
+    if (!ready) box.checked = false;
+  });
+  if (notice) {
+    if (!ready && hasResult) {
+      notice.style.display = '';
+      notice.textContent = 'Отражённая версия не подготовлена. Подготовьте её в разделе «Отражённая версия» перед публикацией перевёрнутых вариантов.';
+    } else {
+      notice.style.display = 'none';
+      notice.textContent = '';
+    }
+  }
+}
+
+async function prepareMirrorVariant() {
+  if (!montageJobId) return;
+  const btn = document.getElementById('prepareMirrorBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/montage/' + encodeURIComponent(montageJobId) + '/prepare-mirror', {method: 'POST'});
+    const data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
+    mergeOpsState({mirror_variant: {status: 'generating', progress: 0, detail: 'Подготовка отражённой версии'}});
+    renderOperations(window.__opsState);
+    applyMirrorVariantState(window.__opsState);
+    startMontagePolling();
+  } catch (e) {
+    const info = document.getElementById('montageMirrorVariantInfo');
+    if (info) info.textContent = 'Ошибка: ' + e.message;
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function refreshMontageResult() {
   if (!montageJobId || montageRefreshInFlight || document.hidden) return;
   const requestedJobId = montageJobId;
@@ -4164,6 +4253,7 @@ async function refreshMontageResult() {
       updatePublishCounts();
     }
     renderCoverState(data);
+    applyMirrorVariantState(data);
     document.getElementById('montageStartBtn').disabled = true;
     const terminalFailure = data.status === 'error' || data.status === 'failed' || data.status === 'interrupted';
     if (terminalFailure) {
@@ -4341,6 +4431,11 @@ async function publishMontage() {
     publishWindowError('Выберите хотя бы одну цель публикации');
     return;
   }
+  const mirrorSelected = targets.some(t => t.endsWith('_mirrored'));
+  if (mirrorSelected && !mirrorVariantReady()) {
+    publishWindowError('Отражённая версия не подготовлена. Подготовьте её в разделе «Отражённая версия» перед публикацией.');
+    return;
+  }
   const unknownSelected = targets.filter(tid => (window.__publishUnknown || []).includes(tid));
   let confirmUnknown = false;
   if (unknownSelected.length) {
@@ -4405,6 +4500,7 @@ function openPublishWindow() {
   document.body.style.overflow = 'hidden';
   updatePublishCounts();
   renderCoverState(window.__coverState || {});
+  applyMirrorVariantState(window.__opsState || {});
   const video = document.getElementById('montageVideo');
   const slider = document.getElementById('montageCoverTime');
   slider.max = String(Math.max(0.1, Number(video.duration) || 1));
@@ -4418,6 +4514,7 @@ function startNewPublication() {
   document.getElementById('montagePublishLiveProgress').innerHTML = '';
   document.getElementById('montagePublishError').classList.remove('active');
   for (const checkbox of document.querySelectorAll('.publish-target-checkbox')) checkbox.checked = false;
+  applyMirrorVariantState(window.__opsState || {});
   const publishButton = document.getElementById('montagePublishBtn');
   publishButton.disabled = false;
   publishButton.textContent = 'Начать публикацию';

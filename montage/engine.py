@@ -997,10 +997,16 @@ def _publish_targets(
     targets: list[dict[str, Any]],
     progress_cb: Callable[[float, str, str], None],
     log_cb: Callable[[str], None],
+    step_cb: Callable[[str, str, str, str], None] | None = None,
 ) -> dict[str, Any]:
     load_secrets_env()
     sw = get_software_defaults()
     results: dict[str, Any] = {}
+
+    def emit_step(key: str, label: str, status: str = "running", detail: str = "") -> None:
+        """Report a named publish sub-step (spec section 10)."""
+        if step_cb is not None:
+            step_cb(key, label, status, detail)
 
     reel = _load_module("publish_reel", INSTAPOSTER_DIR / "publish_reel_github.py")
     trial_mod = _load_module("publish_trial", INSTAPOSTER_DIR / "publish_trial_reel_github.py")
@@ -1015,9 +1021,12 @@ def _publish_targets(
         target_source = mirrored_source_video if bool(target.get("mirrored")) else source_video
         if target_source is None or not Path(target_source).exists():
             preparation_error = str(target.get("preparation_error") or "").strip()
+            emit_step("file", "Проверка готового файла", "failed",
+                      preparation_error or "Видео-версия не подготовлена")
             if preparation_error:
                 raise RuntimeError(f"Не удалось подготовить видео для цели {label}: {preparation_error}")
             raise RuntimeError(f"Не подготовлена видео-версия для цели: {label}")
+        emit_step("file", "Проверка готового файла", "completed")
 
         def sub_progress(p: float, detail: str) -> None:
             progress_cb(min(99, base + span * p / 100), kind, detail)
@@ -1027,26 +1036,32 @@ def _publish_targets(
 
         if kind in {"instagram", "trial"}:
             if not sw["instagram_ready"]:
+                emit_step("auth", "Проверка авторизации", "failed", "Не настроен доступ к Instagram")
                 if not sw.get("github_ready"):
                     raise RuntimeError(
                         "Instagram: для загрузки видео в GitHub Raw не задан GITHUB_TOKEN"
                     )
                 raise RuntimeError("Instagram: не настроен INSTAGRAM_ACCESS_TOKEN / IG_USER_ID")
+            emit_step("auth", "Проверка авторизации", "completed")
             from .instagram_publisher import InstagramPublisher
             instagram = InstagramPublisher(
                 INSTAPOSTER_DIR, shutil.which("ffmpeg") or "ffmpeg",
                 workdir / "publish.log", log_cb,
             )
             variant = "trial" if kind == "trial" else "normal"
+            emit_step("prepare", "Подготовка файла к загрузке", "running")
             staged = instagram.prepare_variant(
                 target_source, workdir / "staging", job_id, variant,
                 lambda p, d: sub_progress(p * 0.2, d),
             )
+            emit_step("prepare", "Подготовка файла к загрузке", "completed")
             graph_ip, raw_ip = instagram.resolve_hosts()
+            emit_step("upload", "Загрузка видео", "running")
             sub_progress(25, "Загрузка в GitHub Raw...")
             _, raw_url = instagram.upload_to_github(staged)
             time.sleep(3)
             instagram.verify_public_video(raw_url, raw_ip, lambda p, d: sub_progress(25 + p * 0.2, d))
+            emit_step("upload", "Загрузка видео", "completed")
             cover_url = ""
             cover_path = Path(str(target.get("cover_path") or ""))
             if cover_path.is_file():
@@ -1054,9 +1069,12 @@ def _publish_targets(
                 _, cover_url = instagram.upload_cover_to_github(cover_path)
                 time.sleep(3)
             caption = str(target.get("caption") or target.get("text") or "")
+            emit_step("processing", "Обработка на стороне площадки", "running")
             container = instagram.create_container(variant, graph_ip, raw_url, caption, cover_url)
             instagram.wait_container(variant, graph_ip, container, lambda p, d: sub_progress(45 + p * 0.5, d))
+            emit_step("processing", "Обработка на стороне площадки", "completed")
             publish_started_at = datetime.now(timezone.utc)
+            emit_step("publish", "Подтверждение публикации", "running")
             try:
                 media_id = instagram.publish_container(variant, graph_ip, container)
                 info = instagram.media_info(variant, graph_ip, media_id)
@@ -1079,7 +1097,9 @@ def _publish_targets(
                     ) from publish_exc
                 media_id = str(info["id"])
                 log_cb(f"media_publish восстановлен по списку публикаций: {media_id}")
+            emit_step("publish", "Подтверждение публикации", "completed")
             permalink = str(info.get("permalink") or "")
+            emit_step("link", "Получение ссылки", "completed", permalink or media_id)
             published_result = {"media_id": media_id, "permalink": permalink, "kind": label}
             try:
                 from .social_stats import archive_instagram_reel
@@ -1103,16 +1123,20 @@ def _publish_targets(
 
         elif kind == "youtube":
             if not sw["youtube_ready"]:
+                emit_step("auth", "Проверка авторизации", "failed", "YouTube не авторизован")
                 raise RuntimeError("YouTube: OAuth token.json не настроен")
             from .youtube_publisher import YouTubePublisher
             youtube = YouTubePublisher(INSTAPOSTER_DIR, Path(sys.executable), workdir / "youtube.log")
             youtube.check_auth()
+            emit_step("auth", "Проверка авторизации", "completed")
             youtube_source = workdir / "youtube_staging" / f"{result_key}.mp4"
+            emit_step("prepare", "Подготовка файла к загрузке", "running")
             youtube.prepare_video(
                 target_source,
                 youtube_source,
                 lambda p, detail: sub_progress(p * 0.25, detail),
             )
+            emit_step("prepare", "Подготовка файла к загрузке", "completed")
             title = str(target.get("title") or target.get("text") or "Мой ролик")
             thumbnail_path = None
             cover_path = Path(str(target.get("cover_path") or ""))
@@ -1125,31 +1149,41 @@ def _publish_targets(
                 upload_ready_called[0] = True
             def yt_progress(p: float, detail: str) -> None:
                 sub_progress(25 + p * 0.75, detail)
+            emit_step("upload", "Загрузка видео", "running")
             info = youtube.upload(youtube_source, title, yt_progress, upload_ready, thumbnail_path)
+            emit_step("upload", "Загрузка видео", "completed")
+            emit_step("publish", "Подтверждение публикации", "completed", "Видео загружено")
+            emit_step("link", "Получение ссылки", "completed", info["shorts_url"])
             results[result_key] = {"video_id": info["video_id"], "shorts_url": info["shorts_url"], "watch_url": info["watch_url"], "kind": label}
             progress_cb(base + span, kind, f"YouTube готов: {info['shorts_url']}")
 
         elif kind == "threads":
             if not sw["threads_ready"]:
+                emit_step("auth", "Проверка авторизации", "failed", "Не настроен доступ к Threads")
                 if not sw.get("github_ready"):
                     raise RuntimeError(
                         "Threads: для загрузки видео в GitHub Raw не задан GITHUB_TOKEN"
                     )
                 raise RuntimeError("Threads: не настроен THREADS_ACCESS_TOKEN / THREADS_USER_ID")
+            emit_step("auth", "Проверка авторизации", "completed")
             from .instagram_publisher import InstagramPublisher
             instagram = InstagramPublisher(
                 INSTAPOSTER_DIR, shutil.which("ffmpeg") or "ffmpeg",
                 workdir / "publish.log", log_cb,
             )
+            emit_step("prepare", "Подготовка файла к загрузке", "running")
             sub_progress(10, "Подготовка видео для GitHub...")
             staged = instagram.prepare_variant(target_source, workdir / "staging", job_id, "threads", lambda p, d: sub_progress(p, d))
+            emit_step("prepare", "Подготовка файла к загрузке", "completed")
             graph_ip = threads_mod.resolve_host_via_doh(threads_mod.THREADS_HOST)
             raw_ip = threads_mod.resolve_host_via_doh(threads_mod.RAW_HOST)
+            emit_step("upload", "Загрузка видео", "running")
             sub_progress(35, "Загрузка в GitHub Raw...")
             _, raw_url = reel.publish_video_to_github(staged)
             time.sleep(3)
             sub_progress(45, "Проверка HTTPS-ссылки...")
             reel.check_public_video(raw_url, raw_ip)
+            emit_step("upload", "Загрузка видео", "completed")
             text = str(target.get("text") or target.get("caption") or "")
             container = threads_mod.threads_request(graph_ip, "POST", "me/threads", {
                 "media_type": "VIDEO",
@@ -1158,15 +1192,20 @@ def _publish_targets(
                 "access_token": threads_mod.ACCESS_TOKEN,
             })
             container_id = str(container["id"])
+            emit_step("processing", "Обработка на стороне площадки", "running")
             sub_progress(55, "Ожидание обработки Threads...")
             threads_mod.wait_container(graph_ip, container_id, timeout_seconds=180)
+            emit_step("processing", "Обработка на стороне площадки", "completed")
+            emit_step("publish", "Подтверждение публикации", "running")
             published = threads_mod.threads_request(graph_ip, "POST", "me/threads_publish", {
                 "creation_id": container_id,
                 "access_token": threads_mod.ACCESS_TOKEN,
             })
             thread_id = str(published["id"])
+            emit_step("publish", "Подтверждение публикации", "completed")
             info = threads_mod.get_thread_info(graph_ip, thread_id)
             permalink = str(info.get("permalink") or "")
+            emit_step("link", "Получение ссылки", "completed", permalink or thread_id)
             results[result_key] = {"thread_id": thread_id, "permalink": permalink, "kind": label}
             progress_cb(base + span, kind, f"Threads готов: {permalink or thread_id}")
 
@@ -1174,15 +1213,19 @@ def _publish_targets(
             bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
             chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
             if not bot_token or not chat_id:
+                emit_step("auth", "Проверка авторизации", "failed", "Не настроен доступ к Telegram")
                 raise RuntimeError("Telegram: не настроен TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID")
+            emit_step("auth", "Проверка авторизации", "completed")
             duration = 0.0
             try:
                 duration = float(ffprobe(target_source).get("format", {}).get("duration") or 0) or 30.0
             except Exception:
                 duration = 30.0
             tg_file = workdir / f"{job_id}_tg.mp4"
+            emit_step("prepare", "Подготовка файла к загрузке", "running")
             sub_progress(15, "Подготовка файла до 45 MB для Telegram...")
             _transcode_to_fit(target_source, tg_file, 45 * 1024 * 1024, duration, sub_progress)
+            emit_step("prepare", "Подготовка файла к загрузке", "completed")
             caption = str(target.get("caption") or target.get("text") or "")
             curl = shutil.which("curl") or "curl"
             cmd = [curl, "-sS", "-X", "POST",
@@ -1191,6 +1234,7 @@ def _publish_targets(
                    "-F", "supports_streaming=true",
                    "-F", f"caption={caption}",
                    "-F", "video=@%s;type=video/mp4" % str(tg_file)]
+            emit_step("upload", "Загрузка видео", "running")
             proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
             if proc.returncode != 0:
                 raise RuntimeError(f"Telegram send failed: {proc.stderr[-400:]}")
@@ -1200,8 +1244,11 @@ def _publish_targets(
                 raise RuntimeError(f"Telegram bad response: {proc.stdout[:400]}")
             if not data.get("ok"):
                 raise RuntimeError(f"Telegram error: {json.dumps(data, ensure_ascii=False)[:400]}")
+            emit_step("upload", "Загрузка видео", "completed")
             result = data.get("result", {}) or {}
             message_id = str(result.get("message_id") or "")
+            emit_step("publish", "Подтверждение публикации", "completed")
+            emit_step("link", "Получение ссылки", "completed", f"message_id={message_id}")
             results[result_key] = {"message_id": message_id, "kind": label, "ok": True}
             progress_cb(base + span, kind, f"Telegram готов: message_id={message_id}")
 
@@ -1224,6 +1271,7 @@ def publish_job(
     log_cb: Callable[[str], None],
     target_progress_cb: Callable[[str, float, str, str], None] | None = None,
     confirmed_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    target_step_cb: Callable[[str, str, str, str, str], None] | None = None,
 ) -> dict[str, Any]:
     instagram_priority = {("trial", False): 0, ("trial", True): 1, ("instagram", False): 2, ("instagram", True): 3}
     instagram_targets = sorted(
@@ -1265,6 +1313,10 @@ def publish_job(
                     target_progress_cb(target_id, percent, detail, "publishing")
                 update_lane(name, (index + percent / 100) * 100 / count, stage, detail)
 
+            def target_step(step_key: str, step_label: str, status: str, detail: str) -> None:
+                if target_step_cb:
+                    target_step_cb(target_id, step_key, step_label, status, detail)
+
             try:
                 result = _publish_targets(
                     job_id=job_id,
@@ -1276,6 +1328,7 @@ def publish_job(
                     targets=[target],
                     progress_cb=target_progress,
                     log_cb=log_cb,
+                    step_cb=target_step,
                 )
                 lane_results.update(result["results"])
                 if confirmed_cb:

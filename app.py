@@ -1015,6 +1015,36 @@ from montage.progress_tracker import failed_snapshot
 _drawing_generation_lock = asyncio.Lock()
 _drawing_generation_jobs: dict[str, dict[str, Any]] = {}
 
+_DRAWING_STAGE_SPECS = (
+    ("prepare", "Подготовка транскрипции"),
+    ("analyse", "Анализ текста"),
+    ("select", "Выбор смысловых моментов"),
+    ("request", "Запрос к BigPickle"),
+    ("response", "Получение ответа"),
+    ("parse", "Разбор ответа"),
+    ("validate", "Проверка координат"),
+    ("save", "Сохранение схем"),
+)
+
+
+def _drawing_stages() -> list[dict[str, Any]]:
+    return [
+        {"key": key, "label": label, "status": "pending", "progress": None, "detail": "", "error": ""}
+        for key, label in _DRAWING_STAGE_SPECS
+    ]
+
+
+def _drawing_stage_set(stages: list, key: str, status: str, detail: str = "", progress=None) -> list:
+    for stage in stages:
+        if stage.get("key") == key:
+            stage["status"] = status
+            if detail:
+                stage["detail"] = detail
+            stage["progress"] = progress
+            break
+    return stages
+
+
 
 def _save_drawing_job(job_id: str) -> None:
     task = _drawing_generation_jobs.get(job_id)
@@ -1053,8 +1083,13 @@ def _recover_drawing_jobs() -> None:
             job["status"] = "error"
             job["phase"] = "Ошибка генерации"
             job["indeterminate"] = False
-            job["progress"] = 100
+            job["progress"] = min(int(job.get("progress") or 0), 95)
             job["error"] = "Генерация была прервана перезапуском сервера"
+            stages = job.get("stages") or _drawing_stages()
+            for stage in stages:
+                if stage.get("status") in ("running", "pending"):
+                    stage["status"] = "error" if stage.get("status") == "running" else "skipped"
+            job["stages"] = stages
             try:
                 path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
@@ -1359,6 +1394,204 @@ def _save_montage_job(job_id: str) -> None:
     os.replace(temporary, target)
 
 
+# --------------------------------------------------------------------------
+# Mirrored render variant (task spec section 9).
+#
+# The "mirrored" publishing variant used to be rendered inside
+# ``process_publish``.  Publishing must never render/encode (spec 9.1), so the
+# variant is now prepared by the montage pipeline: either together with the
+# main render (checkbox "prepare_mirrored") or as a separate montage operation
+# triggered from the UI.  The ready file is stored on the job together with a
+# signature so a stale variant (produced with different montage parameters) is
+# never silently reused (spec 9.5).
+# --------------------------------------------------------------------------
+
+_MIRROR_VARIANT_DIR = "variants_mirrored"
+
+_MONTAGE_SIGNATURE_KEYS = (
+    "mirror_horizontal", "face_tracking", "autozoom", "subtitles",
+    "subtitle_mode", "subtitle_position", "subtitle_x", "subtitle_y",
+    "subtitle_scale", "subtitle_box", "subtitle_font",
+    "blur_banned_words", "edge_mode", "overlays", "animation",
+    "zoom_timeline_override",
+)
+
+
+def _montage_signature(params: dict) -> str:
+    relevant = {key: params.get(key) for key in _MONTAGE_SIGNATURE_KEYS}
+    blob = json.dumps(relevant, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _mirrored_variant_signature(job: dict) -> str:
+    options = dict(job.get("params") or {})
+    options["mirror_horizontal"] = not bool(options.get("mirror_horizontal"))
+    return _montage_signature(options)
+
+
+def _mirror_variant_entry(job: dict) -> Optional[dict]:
+    entry = (job.get("variants") or {}).get("mirrored")
+    return entry if isinstance(entry, dict) else None
+
+
+def mirror_variant_ready(job: dict) -> bool:
+    """True only when a ready, non-stale mirrored file exists on disk."""
+    entry = _mirror_variant_entry(job)
+    if not entry or not entry.get("ready"):
+        return False
+    if entry.get("signature") != _mirrored_variant_signature(job):
+        return False
+    path = entry.get("path")
+    return bool(path) and Path(str(path)).is_file()
+
+
+def _public_mirror_variant(job: dict) -> Optional[dict]:
+    state = job.get("mirror_variant")
+    if not isinstance(state, dict):
+        if mirror_variant_ready(job):
+            return {"status": "done", "progress": 100, "detail": "Отражённая версия готова",
+                    "error": "", "path": _mirror_variant_entry(job).get("path"), "operation": None}
+        return None
+    public = dict(state)
+    public["ready"] = mirror_variant_ready(job)
+    return public
+
+
+async def _render_mirrored_variant(
+    job_id: str, *, report_cb=None, progress_cb=None,
+) -> tuple:
+    """Render the alternate (mirrored) video for *job_id*.
+
+    Reuses the montage pipeline with the mirror flag toggled; overlays are
+    re-staged next to the alternate workdir so the render stays self-contained.
+    Returns ``(path, alternate_options)``.
+    """
+    job = jobs[job_id]
+    loop = asyncio.get_running_loop()
+    workdir = MONTAGE_WORK / job_id
+    alternate_options = dict(job.get("params") or {})
+    alternate_options.pop("prepare_mirrored", None)
+    alternate_options["mirror_horizontal"] = not bool(alternate_options.get("mirror_horizontal"))
+    if job.get("audio_censor_srt"):
+        alternate_options["audio_censor_srt"] = job["audio_censor_srt"]
+    alternate_workdir = workdir / _MIRROR_VARIANT_DIR
+    alternate_workdir.mkdir(parents=True, exist_ok=True)
+    alternate_overlays = []
+    overlay_root = (workdir / "overlays").resolve()
+    for index, overlay in enumerate(alternate_options.get("overlays") or []):
+        staged_overlay = dict(overlay)
+        if str(staged_overlay.get("kind") or "") == "image":
+            source_image = Path(str(staged_overlay.get("image_path") or "")).resolve()
+            try:
+                source_image.relative_to(overlay_root)
+            except ValueError:
+                raise RuntimeError("Файл наложения находится вне каталога задания")
+            if not source_image.is_file():
+                raise RuntimeError(f"Изображение наложения не найдено: {source_image.name}")
+            staged_dir = alternate_workdir / "overlays"
+            staged_dir.mkdir(parents=True, exist_ok=True)
+            staged_image = staged_dir / f"overlay_{index + 1:02d}{source_image.suffix.lower()}"
+            shutil.copy2(source_image, staged_image)
+            staged_overlay["image_path"] = str(staged_image)
+        alternate_overlays.append(staged_overlay)
+    alternate_options["overlays"] = alternate_overlays
+
+    def alt_progress(percent: float, stage: str, detail: str) -> None:
+        if progress_cb is not None:
+            progress_cb(percent, stage, detail)
+
+    meta = await asyncio.to_thread(
+        montage_engine.render_montage,
+        job_id=f"{job_id}_mirror",
+        workdir=alternate_workdir,
+        source_video=Path(job["video_path"]),
+        srt_text=job["srt_text"],
+        options=alternate_options,
+        progress_cb=alt_progress,
+        report_cb=report_cb,
+        log_cb=lambda message: asyncio.run_coroutine_threadsafe(
+            _montage_announce(job_id, f"Отражённая версия: {message}"), loop
+        ),
+    )
+    return Path(meta["result_video"]), alternate_options
+
+
+async def process_mirror_variant(job_id: str) -> None:
+    """Prepare the mirrored publish variant as its own montage operation."""
+    job = jobs.get(job_id)
+    if not job or job.get("kind") != "montage":
+        return
+    loop = asyncio.get_running_loop()
+    signature = _mirrored_variant_signature(job)
+    if mirror_variant_ready(job):
+        previous = dict(job.get("mirror_variant") or {})
+        previous.update(
+            status="done", progress=100, detail="Отражённая версия готова",
+            error="", path=_mirror_variant_entry(job).get("path"), signature=signature,
+        )
+        job["mirror_variant"] = previous
+        _save_montage_job(job_id)
+        return
+
+    job["mirror_variant"] = {
+        "status": "generating", "progress": 0,
+        "detail": "Подготовка отражённой версии", "error": "",
+        "path": None, "signature": signature, "operation": None,
+    }
+    _save_montage_job(job_id)
+    await _montage_announce(job_id, "Подготовка отражённой версии...")
+
+    def report(snapshot: dict) -> None:
+        def store() -> None:
+            state = dict(job.get("mirror_variant") or {})
+            state["operation"] = snapshot
+            state["progress"] = snapshot.get("progress", state.get("progress", 0))
+            state["detail"] = snapshot.get("detail") or state.get("detail") or "Подготовка отражённой версии"
+            if snapshot.get("status") in ("failed", "error"):
+                state["status"] = "error"
+            job["mirror_variant"] = state
+        loop.call_soon_threadsafe(store)
+
+    def progress(percent: float, stage: str, detail: str) -> None:
+        def store() -> None:
+            state = dict(job.get("mirror_variant") or {})
+            try:
+                value = max(0.0, min(100.0, float(percent)))
+            except (TypeError, ValueError):
+                return
+            state["progress"] = max(float(state.get("progress") or 0), value)
+            if detail:
+                state["detail"] = detail
+            job["mirror_variant"] = state
+        loop.call_soon_threadsafe(store)
+
+    try:
+        path, options = await _render_mirrored_variant(job_id, report_cb=report, progress_cb=progress)
+    except BaseException as exc:
+        state = dict(job.get("mirror_variant") or {})
+        state.update(status="error", error=str(exc), detail=str(exc))
+        state["operation"] = failed_snapshot(state.get("operation"), str(exc))
+        job["mirror_variant"] = state
+        _save_montage_job(job_id)
+        await _montage_announce(job_id, f"Отражённая версия не подготовлена: {exc}")
+        return
+    variants = dict(job.get("variants") or {})
+    variants["mirrored"] = {
+        "path": str(path),
+        "mirror_horizontal": bool(options.get("mirror_horizontal")),
+        "signature": signature,
+        "ready": True,
+        "created_at": time.time(),
+    }
+    job["variants"] = variants
+    state = dict(job.get("mirror_variant") or {})
+    state.update(status="done", progress=100, detail="Отражённая версия готова",
+                 error="", path=str(path))
+    job["mirror_variant"] = state
+    _save_montage_job(job_id)
+    await _montage_announce(job_id, f"Отражённая версия готова: {path.name}")
+
+
 def _recover_publish_outcomes(job: dict) -> None:
     """Classify per-platform publish outcomes after an interrupted publish.
 
@@ -1481,6 +1714,16 @@ def _recover_montage_jobs() -> None:
                         operation = job.get("operation")
                         if isinstance(operation, dict) and operation.get("status") != "failed":
                             job["operation"] = failed_snapshot(operation, message)
+                if job.get("variants") is None:
+                    job["variants"] = {}
+                mirror_state = job.get("mirror_variant")
+                if isinstance(mirror_state, dict) and mirror_state.get("status") == "generating":
+                    mirror_msg = "Подготовка отражённой версии прервана перезапуском сервера"
+                    mirror_state = dict(mirror_state)
+                    mirror_state.update(status="error", error=mirror_msg, detail=mirror_msg)
+                    mirror_state["operation"] = failed_snapshot(mirror_state.get("operation"), mirror_msg)
+                    job["mirror_variant"] = mirror_state
+                    recovered_after_interruption = True
                 recovered_id = str(job["id"])
                 jobs[recovered_id] = job
                 if recovered_after_interruption:
@@ -1555,6 +1798,8 @@ def _recover_montage_jobs() -> None:
             "cover_detail": "",
             "cover_error": None,
             "operation": None,
+            "variants": {},
+            "mirror_variant": None,
         }
         _save_montage_job(job_id)
         _run_cleanup_safely(_cleanup_render_artifacts, job_id, jobs[job_id])
@@ -1800,6 +2045,7 @@ async def process_publish(job_id: str, targets: list, publish_lock: Optional[asy
                 "progress": 0,
                 "status": "queued",
                 "detail": "В очереди",
+                "steps": [],
             }
             for target in targets
         }
@@ -1810,71 +2056,31 @@ async def process_publish(job_id: str, targets: list, publish_lock: Optional[asy
         source_video = Path(job["result"]["result_video"])
         mirrored_source_video = None
 
-        if any(bool(target.get("mirrored")) for target in targets):
-            try:
-                for target in targets:
-                    if target.get("mirrored"):
-                        job["publish_progress"][target["id"]].update(
-                            status="preparing", detail="Подготовка отражённой версии"
-                        )
-                await _montage_announce(job_id, "Подготовка отражённой версии...")
-                alternate_options = dict(job.get("params") or {})
-                alternate_options["mirror_horizontal"] = not bool(alternate_options.get("mirror_horizontal"))
-                if job.get("audio_censor_srt"):
-                    alternate_options["audio_censor_srt"] = job["audio_censor_srt"]
-                alternate_workdir = workdir / "publish_mirrored"
-                alternate_overlays = []
-                overlay_root = (workdir / "overlays").resolve()
-                for index, overlay in enumerate(alternate_options.get("overlays") or []):
-                    staged_overlay = dict(overlay)
-                    if str(staged_overlay.get("kind") or "") == "image":
-                        source_image = Path(str(staged_overlay.get("image_path") or "")).resolve()
-                        try:
-                            source_image.relative_to(overlay_root)
-                        except ValueError:
-                            raise RuntimeError("Файл наложения находится вне каталога задания")
-                        if not source_image.is_file():
-                            raise RuntimeError(f"Изображение наложения не найдено: {source_image.name}")
-                        staged_dir = alternate_workdir / "overlays"
-                        staged_dir.mkdir(parents=True, exist_ok=True)
-                        staged_image = staged_dir / f"overlay_{index + 1:02d}{source_image.suffix.lower()}"
-                        shutil.copy2(source_image, staged_image)
-                        staged_overlay["image_path"] = str(staged_image)
-                    alternate_overlays.append(staged_overlay)
-                alternate_options["overlays"] = alternate_overlays
-
-                def alternate_progress(percent: float, stage: str, detail: str) -> None:
-                    progress(min(20, percent * 0.2), f"mirror_{stage}", detail)
-
-                alternate = await asyncio.to_thread(
-                    montage_engine.render_montage,
-                    job_id=f"{job_id}_mirror",
-                    workdir=alternate_workdir,
-                    source_video=Path(job["video_path"]),
-                    srt_text=job["srt_text"],
-                    options=alternate_options,
-                    progress_cb=alternate_progress,
-                    log_cb=lambda message: asyncio.run_coroutine_threadsafe(
-                        _montage_announce(job_id, f"mirror: {message}"), loop
-                    ),
+        # Publishing never renders/encodes (spec 9.1).  The mirrored variant must
+        # already exist on the job (prepared by the montage pipeline).  If it is
+        # missing/stale we fail only the mirrored targets with a clear reason
+        # instead of re-rendering here.
+        mirrored_targets = [target for target in targets if target.get("mirrored")]
+        if mirrored_targets:
+            if mirror_variant_ready(job):
+                mirrored_source_video = Path(_mirror_variant_entry(job)["path"])
+                for target in mirrored_targets:
+                    job["publish_progress"][target["id"]].update(
+                        status="preparing", detail="Отражённая версия готова"
+                    )
+            else:
+                message = (
+                    "Отражённая версия не подготовлена. Подготовьте её в разделе монтажа "
+                    "перед публикацией перевёрнутого варианта."
                 )
-                mirrored_source_video = Path(alternate["result_video"])
-                for target in targets:
-                    if target.get("mirrored"):
-                        job["publish_progress"][target["id"]].update(
-                            status="queued", detail="Отражённая версия готова"
-                        )
-            except Exception as exc:
-                for target in targets:
-                    if target.get("mirrored"):
-                        target["preparation_error"] = str(exc)
-                await _montage_announce(job_id, f"Отражённая версия не подготовлена: {exc}")
+                for target in mirrored_targets:
+                    target["preparation_error"] = message
+                await _montage_announce(job_id, message)
 
         await _montage_announce(job_id, "Публикация...")
 
         def publish_progress(percent: float, stage: str, detail: str) -> None:
-            offset = 20 if mirrored_source_video else 0
-            progress(offset + percent * (100 - offset) / 100, stage, detail)
+            progress(percent, stage, detail)
 
         def target_progress(target_id: str, percent: float, detail: str, status: str) -> None:
             def update() -> None:
@@ -1914,6 +2120,25 @@ async def process_publish(job_id: str, targets: list, publish_lock: Optional[asy
                 _save_montage_job(job_id)
             loop.call_soon_threadsafe(update)
 
+        def target_step(target_id: str, step_key: str, step_label: str, status: str, detail: str) -> None:
+            def update() -> None:
+                item = job["publish_progress"].get(target_id)
+                if item is None:
+                    return
+                steps = list(item.get("steps") or [])
+                entry = next((s for s in steps if s.get("key") == step_key), None)
+                if entry is None:
+                    entry = {"key": step_key, "label": step_label, "status": status, "detail": detail or ""}
+                    steps.append(entry)
+                else:
+                    entry["status"] = status
+                    entry["label"] = step_label or entry.get("label")
+                    if detail:
+                        entry["detail"] = detail
+                item["steps"] = steps
+                _save_montage_job(job_id)
+            loop.call_soon_threadsafe(update)
+
         result = await asyncio.to_thread(
             montage_engine.publish_job,
             job_id=job_id,
@@ -1926,6 +2151,7 @@ async def process_publish(job_id: str, targets: list, publish_lock: Optional[asy
             progress_cb=publish_progress,
             target_progress_cb=target_progress,
             confirmed_cb=confirmed_publish,
+            target_step_cb=target_step,
             log_cb=lambda message: asyncio.run_coroutine_threadsafe(
                 _montage_announce(job_id, message), loop
             ),
@@ -1964,7 +2190,7 @@ async def process_publish(job_id: str, targets: list, publish_lock: Optional[asy
             elif state == "unknown":
                 item.update(progress=None, detail=job["publish_unknown"].get(target_id) or "Результат публикации неизвестен")
             else:
-                item.update(progress=100, detail=item.get("detail")
+                item.update(progress=item.get("progress"), detail=item.get("detail")
                             or job["publish_errors"].get(target_id) or "Публикация не выполнена")
         current_errors = {k: v for k, v in job["publish_errors"].items() if k in expected_targets}
         current_unknown = {k: v for k, v in job["publish_unknown"].items() if k in expected_targets}
@@ -2180,9 +2406,10 @@ async def generate_montage_drawings(request: Request):
         "created_at_epoch": time.time(),
         "attempt": 0,
         "attempts_total": 2,
-        "attempt_timeout_seconds": 240,
+        "attempt_timeout_seconds": 600,
         "last_event": "Задание создано",
         "events": [],
+        "stages": _drawing_stages(),
     }
     _drawing_generation_jobs[job_id] = job
     for old_id in [
@@ -2202,27 +2429,52 @@ async def generate_montage_drawings(request: Request):
         detail = str(event.get("detail") or "BigPickle работает")
         history = list(job.get("events") or [])
         history.append({"event": event_name, "at": event_at, "detail": detail})
+        stages = [dict(stage) for stage in (job.get("stages") or _drawing_stages())]
         fields: dict[str, Any] = {
             "phase": detail,
             "last_event": detail,
-            "events": history[-12:],
+            "events": history[-20:],
             "attempt": int(event.get("attempt") or 0),
-            "attempts_total": int(event.get("attempts_total") or 2),
-            "attempt_timeout_seconds": float(event.get("attempt_timeout_seconds") or 240),
+            "attempts_total": int(event.get("attempts_total") or job.get("attempts_total") or 2),
+            "attempt_timeout_seconds": float(
+                event.get("attempt_timeout_seconds") or job.get("attempt_timeout_seconds") or 600
+            ),
             "indeterminate": False,
         }
         if event_name == "attempt_started":
             fields["attempt_started_at"] = event_at
-        if event_name in {"response_received", "response_parsed"}:
-            fields["progress"] = 90
+            fields["progress"] = max(int(job.get("progress") or 10), 15)
+            _drawing_stage_set(stages, "prepare", "completed")
+            _drawing_stage_set(stages, "analyse", "running", detail)
+            _drawing_stage_set(stages, "select", "running")
+            _drawing_stage_set(stages, "request", "running")
+        elif event_name == "activity":
+            _drawing_stage_set(stages, "request", "running", detail)
+        elif event_name == "response_received":
+            fields["progress"] = 88
+            _drawing_stage_set(stages, "analyse", "completed")
+            _drawing_stage_set(stages, "select", "completed")
+            _drawing_stage_set(stages, "request", "completed")
+            _drawing_stage_set(stages, "response", "running", detail)
+        elif event_name == "response_parsed":
+            fields["progress"] = 94
+            _drawing_stage_set(stages, "response", "completed")
+            _drawing_stage_set(stages, "parse", "completed")
+            _drawing_stage_set(stages, "validate", "running")
+        elif event_name in ("attempt_idle_timeout", "attempt_hard_timeout", "attempt_failed", "attempt_invalid_json"):
+            _drawing_stage_set(stages, "request", "running", detail)
+        fields["stages"] = stages
         _job_update(**fields)
 
     try:
+        _drawing_stage_set(job["stages"], "prepare", "completed")
+        _drawing_stage_set(job["stages"], "analyse", "running", "Ожидание свободного слота BigPickle")
         _job_update(
             phase="Ожидание свободного слота BigPickle",
             last_event="Задание ожидает запуска модели",
             progress=10,
             indeterminate=False,
+            stages=job["stages"],
         )
         if mode == "auto":
             async with _drawing_generation_lock:
@@ -2241,13 +2493,35 @@ async def generate_montage_drawings(request: Request):
                     selected_fragments,
                     _generation_progress,
                 )
-        _job_update(phase="Проверка и сохранение схем", progress=90, indeterminate=False)
+        stages = [dict(stage) for stage in (job.get("stages") or _drawing_stages())]
+        _drawing_stage_set(stages, "analyse", "completed")
+        _drawing_stage_set(stages, "select", "completed")
+        _drawing_stage_set(stages, "request", "completed")
+        _drawing_stage_set(stages, "response", "completed")
+        _drawing_stage_set(stages, "parse", "completed")
+        _drawing_stage_set(stages, "validate", "running")
+        _job_update(phase="Проверка и сохранение схем", progress=90, indeterminate=False, stages=stages)
         if not drawings:
+            _drawing_stage_set(stages, "validate", "completed")
+            _drawing_stage_set(stages, "save", "failed", "Схемы не найдены")
             raise ValueError("BigPickle не предложил ни одной схемы")
         job["drawings"] = drawings
-        _job_update(status="done", phase="Готово", progress=100, drawings=drawings)
+        _drawing_stage_set(stages, "validate", "completed")
+        _drawing_stage_set(stages, "save", "completed")
+        _job_update(status="done", phase="Готово", progress=100, drawings=drawings, stages=stages)
     except Exception as exc:
-        _job_update(status="error", phase="Ошибка генерации", progress=100, indeterminate=False, error=str(exc))
+        failed_progress = min(int(job.get("progress") or 10), 95)
+        stages = [dict(stage) for stage in (job.get("stages") or _drawing_stages())]
+        for stage in stages:
+            if stage.get("status") == "running":
+                stage["status"] = "error"
+                stage["error"] = str(exc)
+            elif stage.get("status") == "pending":
+                stage["status"] = "skipped"
+        _job_update(
+            status="error", phase="Ошибка генерации", progress=failed_progress,
+            indeterminate=False, error=str(exc), stages=stages,
+        )
         _drawing_generation_jobs.pop(job_id, None)
         raise HTTPException(502, f"Не удалось получить рисунки от BigPickle: {exc}")
     return {"drawings": drawings, "job_id": job_id}
@@ -2335,6 +2609,7 @@ async def start_montage(
     propose_cover: bool = Form(False),
     cover_title: str = Form(""),
     zoom_timeline_json: Optional[str] = Form(None),
+    prepare_mirrored: bool = Form(False),
 ):
     job_id = str(uuid.uuid4())[:8]
     work_dir = MONTAGE_WORK / job_id
@@ -2525,6 +2800,8 @@ async def start_montage(
         "cover_error": None,
         "cover_title": cover_title,
         "operation": None,
+        "variants": {},
+        "mirror_variant": None,
     }
     params = {
         "subtitle_mode": subtitle_mode,
@@ -2551,6 +2828,7 @@ async def start_montage(
             "bar": animation_bar,
         },
         "zoom_timeline_override": zoom_override,
+        "prepare_mirrored": bool(prepare_mirrored),
     }
     jobs[job_id]["params"] = params
     _save_montage_job(job_id)
@@ -2570,7 +2848,12 @@ async def start_montage(
                     "covers_dir": str(MONTAGE_WORK / job_id / "covers"),
                 }
                 _save_projects()
-    asyncio.create_task(process_montage(job_id, params))
+    async def _run_montage_then_variant() -> None:
+        await process_montage(job_id, params)
+        if params.get("prepare_mirrored") and jobs.get(job_id, {}).get("status") == "done":
+            await process_mirror_variant(job_id)
+
+    asyncio.create_task(_run_montage_then_variant())
     if propose_cover:
         asyncio.create_task(process_cover_suggestions(job_id))
     return {"job_id": job_id, "filename": original_name}
@@ -2663,6 +2946,15 @@ async def publish_montage(
             target["text"] = text.strip()
             target["caption"] = text.strip()
         targets.append(target)
+    # A mirrored target needs an already-prepared (and non-stale) mirrored
+    # variant.  Publishing never renders it (spec 9.1 / 9.3B), so reject early
+    # with an actionable message instead of failing mid-publish.
+    if any(target.get("mirrored") for target in targets) and not mirror_variant_ready(job):
+        raise HTTPException(
+            409,
+            "Отражённая версия не подготовлена. Подготовьте её в разделе монтажа "
+            "перед публикацией перевёрнутого варианта.",
+        )
     # Atomic per-job reservation: acquire the lock before creating the
     # background task so two near-simultaneous requests can never start two
     # publications for the same job_id.
@@ -2680,6 +2972,33 @@ async def publish_montage(
             lock.release()
         raise
     return {"job_id": job_id, "status": "publishing", "targets": [t.get("kind") for t in targets]}
+
+
+@app.post("/api/montage/{job_id}/prepare-mirror")
+async def prepare_montage_mirror(job_id: str):
+    """Prepare the mirrored publish variant as a separate montage operation.
+
+    Implements scenario B of spec 9.3: the user rendered the video first and
+    now needs the reflected version before publishing the mirrored targets.
+    """
+    if job_id not in jobs or jobs[job_id].get("kind") != "montage":
+        raise HTTPException(404, "Montage job not found")
+    job = jobs[job_id]
+    if job["status"] not in {"done", "completed"} or not job.get("result"):
+        raise HTTPException(400, "Сначала завершите рендер")
+    if mirror_variant_ready(job):
+        return {"job_id": job_id, "status": "ready"}
+    current = job.get("mirror_variant") or {}
+    if current.get("status") == "generating":
+        return {"job_id": job_id, "status": "generating"}
+    job["mirror_variant"] = {
+        "status": "generating", "progress": 0,
+        "detail": "Подготовка отражённой версии", "error": "",
+        "path": None, "signature": _mirrored_variant_signature(job), "operation": None,
+    }
+    _save_montage_job(job_id)
+    asyncio.create_task(process_mirror_variant(job_id))
+    return {"job_id": job_id, "status": "generating"}
 
 
 _youtube_reauth_state: dict[str, str] = {"status": "idle", "detail": ""}
@@ -2743,6 +3062,8 @@ async def montage_result(job_id: str):
         "selected_cover_id": job.get("selected_cover_id") or "",
         "last_publish_targets": job.get("last_publish_targets") or [],
         "operation": job.get("operation"),
+        "mirror_variant": _public_mirror_variant(job),
+        "variants": {"mirrored_ready": mirror_variant_ready(job)},
     }
 
 

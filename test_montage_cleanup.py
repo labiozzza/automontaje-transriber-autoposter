@@ -266,39 +266,62 @@ class MontageCleanupTests(unittest.TestCase):
         job, workdir = self.make_job(job_id="publish01")
         (workdir / "normalized_source.mp4").write_bytes(b"temporary")
         app._cleanup_render_artifacts(job["id"], job)
+        mirror_dir = workdir / "variants_mirrored"
+        mirror_dir.mkdir(parents=True, exist_ok=True)
+        mirror = mirror_dir / "final.mp4"
+        mirror.write_bytes(b"mirror")
+        job["variants"] = {"mirrored": {
+            "path": str(mirror), "mirror_horizontal": True,
+            "signature": app._mirrored_variant_signature(job), "ready": True, "created_at": 0,
+        }}
         targets = [{"id": "instagram_mirror", "kind": "instagram", "mirrored": True, "label": "Mirror"}]
+        captured = {}
 
         def render_mirror(**kwargs):
-            self.assertTrue(Path(kwargs["source_video"]).is_file())
-            self.assertTrue((workdir / f"{job['id']}_words.srt").is_file())
-            mirror_dir = Path(kwargs["workdir"])
-            mirror_dir.mkdir(parents=True, exist_ok=True)
-            mirror = mirror_dir / "final.mp4"
-            mirror.write_bytes(b"mirror")
-            return {"result_video": str(mirror), "preview_video": str(mirror), "timeline": {}}
+            raise AssertionError("publish must not render the mirrored variant")
 
         def publish(**kwargs):
+            captured["mirrored"] = kwargs.get("mirrored_source_video")
             self.assertTrue(Path(kwargs["mirrored_source_video"]).is_file())
             for name in ("staging", "youtube_staging"):
                 directory = workdir / name
                 directory.mkdir()
                 (directory / "active.mp4").write_bytes(b"active")
             (workdir / f"{job['id']}_tg.mp4").write_bytes(b"telegram")
-            self.assertTrue((workdir / "publish_mirrored").is_dir())
             return {"results": {"instagram_mirror": {"ok": True}}, "errors": {}}
 
         with mock.patch.object(app.montage_engine, "render_montage", side_effect=render_mirror), \
                 mock.patch.object(app.montage_engine, "publish_job", side_effect=publish):
             asyncio.run(app.process_publish(job["id"], targets))
 
+        self.assertTrue(Path(captured["mirrored"]).is_file())
         self.assertEqual(job["status"], "done")
         self.assertEqual(job["stage"], "published")
-        self.assertFalse((workdir / "publish_mirrored").exists())
         self.assertFalse((workdir / "staging").exists())
         self.assertFalse((workdir / "youtube_staging").exists())
         self.assertFalse((workdir / f"{job['id']}_tg.mp4").exists())
         self.assertTrue((workdir / "source.mp4").is_file())
         self.assertTrue((workdir / f"{job['id']}_words.srt").is_file())
+        self.assertTrue(mirror.is_file(), "prepared mirrored variant must be kept")
+
+    def test_unprepared_mirrored_publish_fails_without_rendering(self):
+        job, workdir = self.make_job(job_id="publish01b")
+        targets = [{"id": "instagram_mirror", "kind": "instagram", "mirrored": True, "label": "Mirror"}]
+
+        def render_mirror(**kwargs):
+            raise AssertionError("publish must never render the mirrored variant")
+
+        def publish(**kwargs):
+            self.assertIsNone(kwargs.get("mirrored_source_video"))
+            return {"results": {}, "errors": {"instagram_mirror": "Не удалось подготовить видео для цели Mirror: Отражённая версия не подготовлена. Подготовьте её в разделе монтажа перед публикацией перевёрнутого варианта."}}
+
+        with mock.patch.object(app.montage_engine, "render_montage", side_effect=render_mirror), \
+                mock.patch.object(app.montage_engine, "publish_job", side_effect=publish):
+            asyncio.run(app.process_publish(job["id"], targets))
+
+        self.assertEqual(job["publish_status"]["instagram_mirror"], "failed")
+        self.assertTrue(job["publish_errors"]["instagram_mirror"])
+        self.assertNotEqual(job["publish_progress"]["instagram_mirror"]["progress"], 100)
 
     def test_partial_publish_error_keeps_staging_for_diagnostics(self):
         job, workdir = self.make_job(job_id="publish02")
