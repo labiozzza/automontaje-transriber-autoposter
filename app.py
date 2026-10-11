@@ -314,6 +314,19 @@ async def broadcast_progress(job_id: str, progress: float, stage: str, detail: s
                 pass
 
 
+async def broadcast_operation(job_id: str, snapshot: dict):
+    """Push a normalised operation snapshot (see montage/progress_tracker.py)."""
+    job = jobs.get(job_id)
+    if job:
+        job["operation"] = snapshot
+        q = job_queues.get(job_id)
+        if q:
+            try:
+                await q.put({"type": "operation", "operation": snapshot})
+            except Exception:
+                pass
+
+
 async def process_job(job_id: str, params: dict):
     job = jobs[job_id]
     try:
@@ -342,7 +355,7 @@ async def process_job(job_id: str, params: dict):
         # Stage 2: Transcription
         model_name = params.get("model", "small")
         language = params.get("language", "ru")
-        mode = params.get("mode", "sentences")
+        mode = params.get("mode", "words")
 
         loop = asyncio.get_running_loop()
 
@@ -814,7 +827,7 @@ async def start_transcription(
     job_id: str,
     model: str = Form("small"),
     language: str = Form("ru"),
-    mode: str = Form("sentences"),
+    mode: str = Form("words"),
     diarization: bool = Form(False),
     num_speakers: Optional[int] = Form(None),
 ):
@@ -1402,6 +1415,7 @@ def _recover_montage_jobs() -> None:
             "cover_progress": 100 if covers else 0,
             "cover_detail": "",
             "cover_error": None,
+            "operation": None,
         }
         _save_montage_job(job_id)
         _run_cleanup_safely(_cleanup_render_artifacts, job_id, jobs[job_id])
@@ -1500,6 +1514,9 @@ async def process_montage(job_id: str, params: dict):
         workdir = MONTAGE_WORK / job_id
         workdir.mkdir(parents=True, exist_ok=True)
 
+        def report(snapshot: dict) -> None:
+            asyncio.run_coroutine_threadsafe(broadcast_operation(job_id, snapshot), loop)
+
         await _montage_announce(job_id, "Запуск рендера...")
         meta = await asyncio.to_thread(
             montage_engine.render_montage,
@@ -1509,6 +1526,7 @@ async def process_montage(job_id: str, params: dict):
             srt_text=srt_text,
             options=render_params,
             progress_cb=progress,
+            report_cb=report,
             log_cb=lambda message: asyncio.run_coroutine_threadsafe(
                 _montage_announce(job_id, message), loop
             ),
@@ -2274,6 +2292,7 @@ async def start_montage(
         "cover_detail": "",
         "cover_error": None,
         "cover_title": cover_title,
+        "operation": None,
     }
     params = {
         "subtitle_mode": subtitle_mode,
@@ -2453,6 +2472,7 @@ async def montage_result(job_id: str):
         "cover_error": job.get("cover_error"),
         "selected_cover_id": job.get("selected_cover_id") or "",
         "last_publish_targets": job.get("last_publish_targets") or [],
+        "operation": job.get("operation"),
     }
 
 

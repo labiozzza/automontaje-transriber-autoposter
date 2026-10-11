@@ -389,6 +389,26 @@ select option { background: var(--surface2); }
   float: right;
 }
 
+/* Unified collapsible operations component */
+.ops-header { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+.ops-summary { font-size: 13px; color: var(--text2); width: 100%; }
+.ops-chevron { margin-left: auto; color: var(--text2); transition: transform .2s ease; }
+.ops-body.closed { display: none; }
+.ops-op { border: 1px solid var(--border); background: var(--surface2); border-radius: 9px; padding: 10px; margin-top: 10px; }
+.ops-op-head { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.ops-op-bar-wrap { background: rgba(0,0,0,.35); border-radius: 6px; height: 6px; overflow: hidden; margin-top: 8px; }
+.ops-op-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 6px; transition: width .3s ease; width: 0%; }
+.ops-stage { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--text2); }
+.ops-stage .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--border); }
+.ops-stage .dot.running { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.ops-stage .dot.done { background: var(--green); }
+.ops-stage .dot.fail { background: var(--red); }
+.ops-stage .dot.skip { background: var(--text2); opacity: .5; }
+.ops-stage-bar { flex: 1; background: rgba(0,0,0,.35); border-radius: 4px; height: 4px; overflow: hidden; position: relative; }
+.ops-stage-bar i { display: block; height: 100%; background: var(--accent); transition: width .3s ease; }
+.ops-stage-bar i.ind { width: 40%; position: absolute; animation: opsInd 1.2s linear infinite; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+@keyframes opsInd { from { left: -40%; } to { left: 100%; } }
+
 /* Stage icons */
 .stage-icon { margin-right: 6px; }
 
@@ -1306,17 +1326,14 @@ select option { background: var(--surface2); }
       </div>
     </div>
 
-    <!-- Montage progress -->
+    <!-- Montage progress: unified collapsible operations component -->
     <div class="card progress-container active" id="montageProgressCard">
-      <div class="card-title">Прогресс монтажа</div>
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <div class="progress-stage" id="montageProgressStage">Ожидание...</div>
-        <span class="progress-percent" id="montageProgressPercent">0%</span>
+      <div class="ops-header" onclick="toggleOperationsBody()">
+        <strong>Операции</strong>
+        <span class="ops-summary" id="operationSummary">Ожидание...</span>
+        <span class="ops-chevron" id="operationChevron">▾</span>
       </div>
-      <div class="progress-bar-wrapper">
-        <div class="progress-bar" id="montageProgressBar"></div>
-      </div>
-      <div class="progress-detail" id="montageProgressDetail"></div>
+      <div class="ops-body" id="operationsBody"></div>
       <div class="progress-detail" id="montageLog" style="max-height:140px;overflow:auto;white-space:pre-wrap;font-size:12px"></div>
     </div>
 
@@ -2411,6 +2428,17 @@ function updateDrawingFragmentCount() {
   if (count) count.textContent = drawingReplicas.length ? `Заданий: ${drawingReplicas.length} / 12` : 'Отметьте фрагменты транскрипции';
 }
 
+function pushDrawingsOpsState(jobOrState) {
+  const state = jobOrState || {};
+  const pct = state.progress === null || state.progress === undefined
+    ? (state.status === 'done' || state.status === 'error' ? 0 : null)
+    : Number(state.progress) || 0;
+  window.__opsState = Object.assign({}, window.__opsState || {}, {drawings: {
+    status: state.status || 'idle', progress: pct, detail: state.detail || '',
+  }});
+  renderOperations(window.__opsState);
+}
+
 function updateDrawingGenerationProgress(percent, label, active = true) {
   const indeterminate = percent === null || percent === undefined || Number.isNaN(Number(percent));
   const root = document.getElementById('drawingGenerationProgress');
@@ -2512,6 +2540,7 @@ async function finishDrawingJob(jobId, drawings) {
   stopDrawingJobPoll();
   updateDrawingGenerationProgress(100, 'Готово');
   document.getElementById('drawingGenerationProgressDetail').textContent = '';
+  pushDrawingsOpsState({status: 'done', progress: 100, detail: 'Схемы готовы'});
   proposalReviseText = [];
   proposalRevising.clear();
   pendingRevisionHistory.clear();
@@ -2529,6 +2558,7 @@ function finishDrawingJobError(job) {
   stopDrawingJobPoll();
   updateDrawingGenerationProgress(100, 'Ошибка генерации');
   document.getElementById('drawingGenerationProgressDetail').textContent = job.last_event || '';
+  pushDrawingsOpsState({status: 'error', progress: 0, detail: job.error || 'Неизвестная ошибка'});
   drawingGenerationMessage(`Ошибка BigPickle: ${job.error || 'неизвестная ошибка'}`, true);
   document.getElementById('generateDrawingsBtn').disabled = false;
 }
@@ -2549,6 +2579,7 @@ function applyDrawingJobStatus(job) {
   const percent = received ? 90 : live.percent;
   updateDrawingGenerationProgress(percent, job.phase || 'Подготовка');
   document.getElementById('drawingGenerationProgressDetail').textContent = live.text;
+  pushDrawingsOpsState({status: 'running', progress: percent, detail: live.text});
 }
 
 function startDrawingJobPoll(jobId) {
@@ -3679,7 +3710,16 @@ function connectMontageWs() {
   montageWs.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'progress') {
+      window.__opsState = Object.assign({}, window.__opsState || {}, {
+        progress: msg.progress, stage: msg.stage, detail: msg.detail,
+        status: (msg.stage === 'error' ? 'error' : (msg.stage === 'done' || msg.stage === 'published' ? 'done' : 'processing')),
+      });
       montageUpdateProgress(msg.progress, msg.stage, msg.detail);
+      renderOperations(window.__opsState);
+    } else if (msg.type === 'operation') {
+      window.__opsState = Object.assign({}, window.__opsState || {}, { operation: msg.operation });
+      montageUpdateProgress(msg.operation.progress, msg.operation.active_stage || msg.operation.status, msg.operation.detail || '', false);
+      renderOperations(window.__opsState);
     } else if (msg.type === 'log') {
       const logBox = document.getElementById('montageLog');
       logBox.textContent += msg.message + '\n';
@@ -3699,12 +3739,106 @@ function startMontagePolling() {
   refreshMontageResult();
 }
 
+let operationsBodyOpen = true;
+function toggleOperationsBody() {
+  operationsBodyOpen = !operationsBodyOpen;
+  const body = document.getElementById('operationsBody');
+  if (body) body.classList.toggle('closed', !operationsBodyOpen);
+  document.getElementById('operationChevron').textContent = operationsBodyOpen ? '▾' : '▸';
+}
+
+function opStatusLabel(status) {
+  const map = { pending: 'в очереди', running: 'выполняется', completed: 'готово', failed: 'ошибка',
+    skipped: 'пропущено', cancelled: 'отменено', done: 'готово', error: 'ошибка', generating: 'выполняется',
+    publishing: 'выполняется', processing: 'выполняется', queued: 'в очереди', preparing: 'подготовка',
+    idle: 'не запускалось', uploaded: 'загружено' };
+  return map[status] || status;
+}
+
+function opsStageRow(stage) {
+  const dot = { pending: '', running: 'running', completed: 'done', failed: 'fail', skipped: 'skip' }[stage.status] || '';
+  const pct = stage.progress == null ? null : Number(stage.progress);
+  let bar = '<span class="dot ' + dot + '"></span>';
+  bar += '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(stage.label || stage.key) + '</span>';
+  bar += '<span class="ops-stage-bar">' + (pct == null && stage.status === 'running' ? '<i class="ind"></i>'
+    : '<i style="width:' + (stage.status === 'completed' ? 100 : (pct == null ? 0 : pct)) + '%"></i>') + '</span>';
+  const detail = stage.detail || stage.error || '';
+  if (detail) bar += '<span style="max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text3)">' + esc(detail) + '</span>';
+  return '<div class="ops-stage">' + bar + '</div>';
+}
+
+function opsOpBlock(op) {
+  let html = '<div class="ops-op">';
+  html += '<div class="ops-op-head"><span>' + esc(op.label) + '</span>';
+  html += '<span style="margin-left:auto;font-size:12px;color:var(--text2)">' + opStatusLabel(op.status || '') + '</span>';
+  html += '<span style="font-size:12px;color:var(--accent2);min-width:40px;text-align:right">' + (op.progress == null ? '…' : Math.round(op.progress) + '%') + '</span></div>';
+  const width = op.progress == null ? 100 : Math.round(Math.max(0, Math.min(100, op.progress)));
+  html += '<div class="ops-op-bar-wrap"><div class="ops-op-bar" style="width:' + width + '%"></div></div>';
+  if (op.detail) html += '<div style="font-size:12px;color:var(--text2);margin-top:6px">' + esc(op.detail) + '</div>';
+  if (op.stages) html += '<div style="margin-top:8px">' + op.stages.map(opsStageRow).join('') + '</div>';
+  if (op.targets && op.targets.length) {
+    html += '<div style="margin-top:6px">' + op.targets.map(function(t) {
+      const td = t.status === 'done' ? 'done' : (t.status === 'error' ? 'fail' : (t.status === 'queued' ? '' : 'running'));
+      return '<div class="ops-stage"><span class="dot ' + td + '"></span>'
+        + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(t.label || t.id) + '</span>'
+        + '<span style="color:var(--text2);font-size:12px">' + esc(t.detail || opStatusLabel(t.status)) + '</span></div>';
+    }).join('') + '</div>';
+  }
+  return html + '</div>';
+}
+
+function buildOpsState(state) {
+  const ops = [];
+  const opSnap = state.operation;
+  if (opSnap) {
+    ops.push({ label: 'Монтаж', status: state.status || opSnap.status || 'running',
+      progress: opSnap.progress, detail: opSnap.detail || '', stages: opSnap.stages || [] });
+  } else {
+    ops.push({ label: 'Монтаж', status: state.status || 'processing', progress: Number(state.progress) || 0,
+      detail: state.detail || state.stage || '', stages: null });
+  }
+  const cs = state.cover_status;
+  if (cs && ['generating', 'done', 'error', 'idle'].includes(cs)) {
+    ops.push({ label: 'Обложки', status: cs, progress: Number(state.cover_progress) || 0, detail: state.cover_detail || '', stages: null });
+  }
+  if (state.drawings) {
+    ops.push({ label: 'Схемы', status: state.drawings.status, progress: state.drawings.progress === null ? null : Number(state.drawings.progress) || 0, detail: state.drawings.detail || '', stages: null });
+  }
+  if (state.publish_progress) {
+    const targets = Object.values(state.publish_progress);
+    const doneTargets = targets.filter(function(t) { return t.status === 'done'; }).length;
+    const st = targets.every(function(t) { return t.status === 'done'; }) ? 'done' : 'publishing';
+    ops.push({ label: 'Публикация', status: st, progress: targets.length ? Math.round(doneTargets / targets.length * 100) : 0,
+      detail: 'Опубликовано ' + doneTargets + ' из ' + targets.length, stages: null, targets: targets });
+  }
+  return ops;
+}
+
+function renderOperations(state) {
+  const card = document.getElementById('montageProgressCard');
+  if (!card) return;
+  const ops = buildOpsState(state || {});
+  const body = document.getElementById('operationsBody');
+  const summary = document.getElementById('operationSummary');
+  if (!body || !summary) return;
+  const montageOp = ops.find(function(o) { return o.label === 'Монтаж'; });
+  const headOp = montageOp || ops[0];
+  if (headOp) {
+    summary.textContent = (headOp.detail ? headOp.detail + ' · ' : '') + (headOp.progress == null ? 'работаем' : headOp.progress.toFixed(1) + '%');
+  } else {
+    summary.textContent = 'Нет активных операций';
+  }
+  body.className = 'ops-body' + (operationsBodyOpen ? '' : ' closed');
+  if (!ops.length) {
+    body.innerHTML = '<div style="font-size:12px;color:var(--text2)">Нет активных операций</div>';
+  } else {
+    body.innerHTML = ops.map(opsOpBlock).join('');
+  }
+  document.getElementById('operationChevron').textContent = operationsBodyOpen ? '▾' : '▸';
+}
+renderOperations({});
+
 function montageUpdateProgress(progress, stage, detail, refreshAfterTerminal = true) {
-  const pct = Math.max(0, Math.min(100, Number(progress) || 0));
-  document.getElementById('montageProgressBar').style.width = pct + '%';
-  document.getElementById('montageProgressPercent').textContent = pct.toFixed(1) + '%';
-  document.getElementById('montageProgressStage').textContent = detail || stage;
-  document.getElementById('montageProgressDetail').textContent = detail || '';
   if (refreshAfterTerminal && (stage === 'done' || stage === 'published' || stage === 'error')) {
     setTimeout(refreshMontageResult, 600);
   }
@@ -3718,7 +3852,9 @@ async function refreshMontageResult() {
     const res = await fetch(`/api/montage/result/${requestedJobId}`);
     const data = await res.json();
     if (requestedJobId !== montageJobId) return;
+    window.__opsState = data;
     montageUpdateProgress(data.progress || 0, data.stage || data.status, data.detail || '', false);
+    renderOperations(data);
     if (data.selected_cover_id && !window.__selectedCoverId) {
       window.__selectedCoverId = data.selected_cover_id;
     }

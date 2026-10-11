@@ -17,6 +17,7 @@ from types import ModuleType
 from typing import Any, Callable
 
 from .audio_censor import build_volume_filter, find_mute_intervals, needs_word_alignment
+from .progress_tracker import ProgressTracker, montage_plan
 from .secrets_env import load_secrets_env, get_software_defaults, media_repo_dir
 
 MONAGE_DIR = Path(__file__).resolve().parent
@@ -148,6 +149,90 @@ def run_cmd(
         return proc.wait()
 
 
+def run_ffmpeg_progress(
+    cmd: list[str],
+    *,
+    duration: float,
+    on_progress: Callable[[float], None] | None = None,
+    cwd: Path | None = None,
+    log_path: Path | None = None,
+    timeout: int = 1800,
+) -> int:
+    """Run an ffmpeg command and report real progress from ``-progress pipe:1``.
+
+    FFmpeg emits ``out_time_us``/``out_time_ms`` in **microseconds** (the ``ms``
+    name is a long-standing quirk), so we divide by 1_000_000 — never by 1000 —
+    and clamp against the probed ``duration``.  Reading happens on a worker
+    thread so a hung encoder cannot block the UI forever.
+    """
+    ff = cmd[0] if cmd else (shutil.which("ffmpeg") or "ffmpeg")
+    full = [ff, "-hide_banner", "-nostats", "-loglevel", "error",
+            "-progress", "pipe:1"] + list(cmd[1:])
+    log_file = None
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = log_path.open("a", encoding="utf-8", errors="replace")
+    stderr_target = log_file if log_file is not None else subprocess.DEVNULL
+    try:
+        proc = subprocess.Popen(
+            full, cwd=str(cwd) if cwd else None,
+            stdout=subprocess.PIPE, stderr=stderr_target,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except FileNotFoundError:
+        if log_file is not None:
+            log_file.close()
+        raise RuntimeError("ffmpeg не найден")
+    assert proc.stdout is not None
+    seen_end = {"done": False}
+
+    def _reader() -> None:
+        for line in proc.stdout:
+            line = line.strip()
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key in ("out_time_us", "out_time_ms", "out_time_us_hi"):
+                try:
+                    micros = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if micros < 0:
+                    micros = 0
+                seconds = micros / 1_000_000.0
+                if on_progress is not None:
+                    pct = 0.0 if duration <= 0 else min(99.5, seconds / duration * 100.0)
+                    try:
+                        on_progress(pct)
+                    except Exception:
+                        pass
+            elif key == "progress" and value == "end":
+                seen_end["done"] = True
+                if on_progress is not None:
+                    try:
+                        on_progress(100.0)
+                    except Exception:
+                        pass
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        reader.join(timeout=5)
+        raise RuntimeError("ffmpeg превысил лимит времени")
+    reader.join(timeout=5)
+    if log_file is not None:
+        log_file.close()
+    return code
+
+
 def build_words_srt(segments: list[dict[str, Any]]) -> str:
     def fmt(t: float) -> str:
         h = int(t // 3600)
@@ -251,6 +336,7 @@ def render_montage(
     options: dict[str, Any],
     progress_cb: Callable[[float, str, str], None],
     log_cb: Callable[[str], None],
+    report_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     load_secrets_env()
     workdir.mkdir(parents=True, exist_ok=True)
@@ -262,12 +348,17 @@ def render_montage(
     # so probe BOTH tags.rotate AND the side_data rotation before deciding.
     source_video = Path(source_video)
     _rover: dict[str, Any] = {}
+    _duration = 0.0
     try:
         _probe = json.loads(subprocess.check_output(
             [shutil.which("ffprobe") or "ffprobe", "-v", "error",
-             "-show_streams", "-of", "json", str(source_video)],
+             "-show_streams", "-show_format", "-of", "json", str(source_video)],
             text=True, encoding="utf-8", errors="replace", timeout=90,
         ))
+        try:
+            _duration = float((_probe.get("format") or {}).get("duration") or 0.0)
+        except (TypeError, ValueError):
+            _duration = 0.0
         for _st in _probe.get("streams") or []:
             if _st.get("codec_type") != "video":
                 continue
@@ -307,8 +398,44 @@ def render_montage(
             break
     except Exception:
         _rover = {}
+
+    options = dict(options)
+    options["_rotation_applied"] = _rover.get("rotate") in (90, 270)
+    tracker = ProgressTracker(job_id, "montage", montage_plan(options),
+                              label=str(options.get("title") or "Автомонтаж"))
+
+    def _emit() -> None:
+        snap = tracker.snapshot()
+        if report_cb is not None:
+            try:
+                report_cb(snap)
+            except Exception:
+                pass
+        progress_cb(snap["progress"], snap.get("active_stage") or snap["status"],
+                    snap.get("detail", ""))
+
+    def _start(key: str, detail: str = "") -> None:
+        tracker.start(key, detail)
+        _emit()
+
+    def _upd(key: str, progress: float | None, detail: str = "") -> None:
+        tracker.update(key, progress, detail)
+        _emit()
+
+    def _done(key: str, detail: str = "") -> None:
+        tracker.complete(key, detail)
+        _emit()
+
+    def _skip(key: str, detail: str = "") -> None:
+        if key in tracker.stage_keys():
+            tracker.skip(key, detail)
+            _emit()
+
+    _start("prepare", "Проверка и подготовка исходника...")
+    _done("prepare", "Исходник готов")
+
     if _rover.get("rotate") in (90, 270):
-        progress_cb(1, "rotate", "Нормализация ориентации (автоповорот)...")
+        _start("rotate", "Нормализация ориентации (автоповорот)...")
         _norm = workdir / "normalized_source.mp4"
         _src_rot = int(_rover.get("rotate") or 0)
         _vw, _vh = int(_rover.get("w") or 0), int(_rover.get("h") or 0)
@@ -322,18 +449,24 @@ def render_montage(
                 "-movflags", "+faststart",
                 str(_norm),
             ]
-            _code = subprocess.run(_cmd, capture_output=True, timeout=1800).returncode
+            _code = run_ffmpeg_progress(_cmd, duration=_duration, cwd=workdir,
+                                        log_path=workdir / "rotate.log",
+                                        on_progress=lambda p: _upd("rotate", p),
+                                        timeout=1800)
             if _code == 0 and _norm.exists():
                 source_video = _norm
-                progress_cb(4, "rotate", "Ориентация нормализована")
-    else:
-        if source_video.suffix.lower() == ".mov" and _rover.get("rotate") not in (90, 270):
-            # Portrait iPhone .mov without explicit rotation tag: keep as-is (no rotation -> already upright)
-            pass
+                _done("rotate", "Ориентация нормализована")
+            else:
+                _done("rotate", "Поворот не применён")
+        else:
+            _done("rotate", "Поворот не требуется")
+    elif source_video.suffix.lower() == ".mov" and _rover.get("rotate") not in (90, 270):
+        # Portrait iPhone .mov without explicit rotation tag: keep as-is (no rotation -> already upright)
+        pass
 
     do_mirror = bool(options.get("mirror_horizontal", False))
     if do_mirror:
-        progress_cb(4, "mirror", "Отражение исходного видео по горизонтали...")
+        _start("mirror", "Отражение исходного видео по горизонтали...")
         mirrored_source = workdir / "mirrored_source.mp4"
         mirror_cmd = [
             shutil.which("ffmpeg") or "ffmpeg", "-y", "-i", str(source_video),
@@ -342,11 +475,14 @@ def render_montage(
             "-c:a", "copy", "-metadata:s:v:0", "rotate=0", "-movflags", "+faststart",
             str(mirrored_source),
         ]
-        code = run_cmd(mirror_cmd, cwd=workdir, log_path=workdir / "mirror.log", timeout=1800)
+        code = run_ffmpeg_progress(mirror_cmd, duration=_duration, cwd=workdir,
+                                   log_path=workdir / "mirror.log",
+                                   on_progress=lambda p: _upd("mirror", p),
+                                   timeout=1800)
         if code != 0 or not mirrored_source.exists():
             raise RuntimeError("Не удалось отразить исходное видео")
         source_video = mirrored_source
-        progress_cb(5, "mirror", "Исходное видео отражено")
+        _done("mirror", "Исходное видео отражено")
 
     subtitle_mode = str(options.get("subtitle_mode") or "words")
     subtitle_position = str(options.get("subtitle_position") or "custom")
@@ -365,13 +501,13 @@ def render_montage(
     zoom_out = workdir / "zoom.mp4"
 
     # ---- Stage: generate zoom/subtitle configs ----
-    progress_cb(5, "configs", "Генерация конфигов зума и подсветки (BigPickle)...")
+    _start("configs", "Генерация конфигов зума и подсветки (BigPickle)...")
     env = dict(os.environ)
     env["USE_BIGPICKLE"] = "1" if use_bigpickle else "0"
     code = run_cmd(
         [PYTHON, "-u", str(MONAGE_DIR / "generate_configs_from_transcript_srt.py"), str(transcript)],
         cwd=workdir, log_path=workdir / "configs.log", timeout=900,
-        line_cb=lambda line: progress_cb(8, "configs", line.strip()[:120]),
+        line_cb=lambda line: _upd("configs", None, line.strip()[:120]),
         env=env,
     )
     if code != 0:
@@ -429,10 +565,10 @@ def render_montage(
             cfg["render"]["zoom"]["timeline"] = events
             zoom_config_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
 
-    progress_cb(15, "configs", "Конфиги готовы")
+    _done("configs", "Конфиги готовы")
 
     if do_face_track and do_zoom:
-        progress_cb(16, "faces", "Анализ лиц и глаз (MediaPipe)...")
+        _start("faces", "Анализ лиц и глаз (MediaPipe)...")
         if not face_model_ready():
             raise RuntimeError("Модель face_landmarker.task не найдена — она скачивается один раз при наличии интернета")
         cmd = [
@@ -451,13 +587,13 @@ def render_montage(
         if code != 0:
             raise RuntimeError("Анализ лиц не удался")
         ensure_tracking_has_anchors(tracking_path)
-        progress_cb(35, "faces", "Анализ лиц завершён")
+        _done("faces", "Анализ лиц завершён")
     else:
         if tracking_path.exists():
             tracking_path.unlink()
 
     if do_zoom:
-        progress_cb(36, "zoom", "Применение автозума...")
+        _start("zoom", "Применение автозума...")
         tracking_arg = str(tracking_path) if tracking_path.exists() else ""
         cmd = [
             PYTHON, "-u", str(MONAGE_DIR / "apply_face_zoom_v5.py"),
@@ -467,23 +603,23 @@ def render_montage(
             "--zoom-source", "timeline",
             "--edge-mode", edge_mode,
         ] + ([ "--tracking", tracking_arg] if tracking_arg else [])
-        last_pct: list[int] = [36]
         def zoom_line(line: str) -> None:
             if "processed" in line:
                 match = [p for p in line.split() if "/" in p]
                 if match:
                     current, total = match[-1].split("/")
                     try:
-                        pct = 36 + int(current) / max(1, int(total)) * 29
-                        progress_cb(pct, "zoom", line.strip()[:140])
+                        frac = int(current) / max(1, int(total))
+                        _upd("zoom", frac * 100, line.strip()[:140])
                     except Exception:
                         pass
         code = run_cmd(cmd, cwd=workdir, log_path=workdir / "zoom.log", line_cb=zoom_line)
         if code != 0:
             raise RuntimeError("Автозум не удался")
-        progress_cb(66, "zoom", "Автозум готов")
+        _done("zoom", "Автозум готов")
         base_video = zoom_out
     else:
+        _skip("zoom", "Автозум отключён")
         base_video = source_video
 
     # ---- Stage: subtitles ----
@@ -499,7 +635,7 @@ def render_montage(
         }
         config_name, out_name = configs.get(subtitle_mode, configs["sentences"])
         out_mp4 = workdir / out_name
-        progress_cb(68, "subtitles", "Наложение цветных субтитров...")
+        _start("subtitles", "Наложение цветных субтитров...")
         cmd = [
             PYTHON, "-u", str(MONAGE_DIR / "apply_auto_subtitles_v2.py"),
             "--config", str(workdir / config_name),
@@ -508,22 +644,21 @@ def render_montage(
         ]
         if font:
             cmd += ["--font", str(font)]
-        subtitle_end = 89 if overlays_cfg or bool(animation_cfg.get("enabled")) else 99
         def sub_line(line: str) -> None:
             if "progress:" in line or "frame=" in line:
                 try:
                     prefix = line.split("(")[-1].split("%")[0].strip()
                     source_pct = max(0.0, min(100.0, float(prefix)))
-                    pct = 68 + source_pct * (subtitle_end - 68) / 100
-                    progress_cb(pct, "subtitles", line.strip()[:140])
+                    _upd("subtitles", source_pct, line.strip()[:140])
                 except Exception:
-                    progress_cb(75, "subtitles", line.strip()[:140])
+                    _upd("subtitles", None, line.strip()[:140])
         code = run_cmd(cmd, cwd=workdir, log_path=workdir / "subtitles.log", line_cb=sub_line)
         if code != 0:
             raise RuntimeError("Наложение субтитров не удалось")
         outputs[subtitle_mode] = out_mp4
-        progress_cb(subtitle_end, "subtitles", "Субтитры готовы")
+        _done("subtitles", "Субтитры готовы")
     else:
+        _skip("subtitles", "Субтитры отключены")
         outputs["video"] = base_video
 
     final_mp4 = outputs.get(subtitle_mode) or outputs.get("video")
@@ -607,6 +742,7 @@ def render_montage(
         })
 
     if render_layers:
+        _start("animation", f"Рендер визуальных слоёв: {len(render_layers)}...")
         anim_out = workdir / "with_visual_layers.mp4"
         overlay_config = workdir / "overlay_timeline_config.json"
         overlay_config.write_text(json.dumps({
@@ -615,7 +751,6 @@ def render_montage(
             "animations_dir": str(ANIMATIONS_DIR.resolve()),
             "overlays": render_layers,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
-        progress_cb(90, "animation", f"Рендер визуальных слоёв: {len(render_layers)}...")
         cmd = [
             PYTHON, "-u", str(MONAGE_DIR / "apply_timeline_animation.py"),
             "--config", str(overlay_config),
@@ -625,15 +760,17 @@ def render_montage(
             if "processed" in line:
                 try:
                     current, total = [p for p in line.split() if "/" in p][0].split("/")
-                    pct = 90 + min(9, int(current) / max(1, int(total)) * 9)
-                    progress_cb(pct, "animation", line.strip()[:140])
+                    frac = int(current) / max(1, int(total))
+                    _upd("animation", frac * 100, line.strip()[:140])
                 except Exception:
                     pass
         code = run_cmd(cmd, cwd=workdir, log_path=workdir / "animation.log", line_cb=anim_line)
         if code != 0:
             raise RuntimeError("Рендер визуальных слоёв не удался")
         final_mp4 = anim_out
-        progress_cb(99, "animation", "Визуальные слои готовы")
+        _done("animation", "Визуальные слои готовы")
+    else:
+        _skip("animation", "Нет слоёв для наложения")
 
     if not final_mp4.exists():
         raise RuntimeError("Не создан итоговый файл")
@@ -642,9 +779,9 @@ def render_montage(
     censor_srt_text = str(options.get("audio_censor_srt") or srt_text)
     muted_intervals = find_mute_intervals(censor_srt_text) if blur_banned_words else []
     if muted_intervals:
+        _start("audio_censor", f"Заглушение нежелательных слов: {len(muted_intervals)}")
         probe = ffprobe(final_mp4)
         if any(stream.get("codec_type") == "audio" for stream in probe.get("streams") or []):
-            progress_cb(99, "audio_censor", f"Заглушение нежелательных слов: {len(muted_intervals)}")
             censored_mp4 = workdir / "censored_audio.mp4"
             censor_cmd = [
                 shutil.which("ffmpeg") or "ffmpeg", "-y", "-i", str(final_mp4),
@@ -658,8 +795,12 @@ def render_montage(
                 raise RuntimeError(f"Не удалось заглушить нежелательные слова: {detail}")
             final_mp4 = censored_mp4
             log_cb(f"Нежелательные слова заглушены: {len(muted_intervals)} интервалов")
+            _done("audio_censor", f"Заглушено слов: {len(muted_intervals)}")
         else:
             muted_intervals = []
+            _skip("audio_censor", "В видео нет звуковой дорожки")
+    else:
+        _skip("audio_censor", "Заглушение не требуется")
 
     delivery_mp4 = workdir / "final.mp4"
     delivery_cmd = [
@@ -675,16 +816,42 @@ def render_montage(
         "-profile:v", "high", "-level:v", "4.1", "-preset", "medium", "-crf", "12",
         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(preview_mp4),
     ]
-    progress_cb(99, "finalize", "Одновременное кодирование финального файла и preview...")
+    _start("finalize", "Кодирование финального файла (H.265)...")
+    _start("preview", "Кодирование версии для просмотра (H.264)...")
+
+    def _late_final(p: float) -> None:
+        _upd("finalize", p)
+
+    def _late_preview(p: float) -> None:
+        _upd("preview", p)
+
     with ThreadPoolExecutor(max_workers=2) as executor:
-        delivery_future = executor.submit(subprocess.run, delivery_cmd, capture_output=True, timeout=1800)
-        preview_future = executor.submit(subprocess.run, preview_cmd, capture_output=True, timeout=1800)
-        delivery_result = delivery_future.result()
-        preview_result = preview_future.result()
-    if delivery_result.returncode != 0:
+        delivery_future = executor.submit(
+            run_ffmpeg_progress, delivery_cmd, duration=_duration, cwd=workdir,
+            log_path=workdir / "finalize.log", on_progress=_late_final, timeout=1800)
+        preview_future = executor.submit(
+            run_ffmpeg_progress, preview_cmd, duration=_duration, cwd=workdir,
+            log_path=workdir / "preview.log", on_progress=_late_preview, timeout=1800)
+        try:
+            delivery_code = delivery_future.result()
+        except Exception:
+            delivery_code = 1
+        try:
+            preview_code = preview_future.result()
+        except Exception:
+            preview_code = 1
+    if delivery_code != 0 or not delivery_mp4.exists():
         delivery_mp4 = final_mp4
-    if preview_result.returncode != 0:
+        tracker.complete("finalize", "Используется исходный поток")
+        _emit()
+    else:
+        _done("finalize", "Финальный файл готов")
+    if preview_code != 0 or not preview_mp4.exists():
         preview_mp4 = delivery_mp4
+        tracker.complete("preview", "Preview не создан")
+        _emit()
+    else:
+        _done("preview", "Preview готов")
 
     timeline_data: dict[str, Any] = {
         "subtitle_position": subtitle_position,
@@ -732,7 +899,12 @@ def render_montage(
         meta["duration"] = float(probe.get("format", {}).get("duration") or 0)
     except Exception:
         meta["duration"] = 0
-    progress_cb(100, "done", "Рендер завершён")
+    for key in tracker.stage_keys():
+        if tracker.stage(key).status == PENDING:
+            tracker.skip(key, "Этап не выполнялся")
+    _done("verify", "Проверка результата")
+    tracker.finish("Рендер завершён")
+    _emit()
     return meta
 
 
