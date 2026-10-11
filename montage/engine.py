@@ -1223,6 +1223,7 @@ def publish_job(
     progress_cb: Callable[[float, str, str], None],
     log_cb: Callable[[str], None],
     target_progress_cb: Callable[[str, float, str, str], None] | None = None,
+    confirmed_cb: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     instagram_priority = {("trial", False): 0, ("trial", True): 1, ("instagram", False): 2, ("instagram", True): 3}
     instagram_targets = sorted(
@@ -1277,12 +1278,15 @@ def publish_job(
                     log_cb=log_cb,
                 )
                 lane_results.update(result["results"])
+                if confirmed_cb:
+                    confirmed_cb(target_id, dict(result["results"][target_id]))
                 if target_progress_cb:
                     target_progress_cb(target_id, 100, "Опубликовано", "done")
             except Exception as exc:
                 lane_errors[target_id] = str(exc)
                 if target_progress_cb:
-                    target_progress_cb(target_id, 100, str(exc), "error")
+                    outcome = "unknown" if str(exc).startswith("AMBIGUOUS_MEDIA_PUBLISH:") else "error"
+                    target_progress_cb(target_id, 100, str(exc), outcome)
                 log_cb(f"publish target failed: {target_id}: {exc}")
             update_lane(name, (index + 1) * 100 / count, target_id, f"Цель завершена: {target_id}")
         return lane_results, lane_errors

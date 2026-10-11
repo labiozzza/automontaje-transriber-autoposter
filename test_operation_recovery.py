@@ -63,18 +63,110 @@ class OperationRecoveryTest(unittest.TestCase):
         job = app_module.jobs.get(self.job_id)
         self.assertIsNotNone(job, "job was not recovered")
         self.assertNotIn(job["status"], {"processing", "publishing"})
-        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["stage"], "interrupted")
+        self.assertIsNone(job.get("result"))
+        self.assertLess(job["progress"], 100)
         op = job.get("operation") or {}
         self.assertEqual(op.get("status"), "failed")
         self.assertIn("прерван", op.get("error", "").lower())
-        self.assertEqual(set(job.get("publish_errors") or {}), {"ig", "yt"})
+        self.assertEqual(job.get("detail"), "Монтаж прерван перезапуском сервера")
+
+    def test_interrupted_keeps_completed_stages(self):
+        self._write_state(
+            operation={
+                "version": 3,
+                "status": "running",
+                "active_stage": "render",
+                "progress": 57,
+                "stages": [
+                    {"key": "transcript", "label": "Стенограмма", "status": "completed", "progress": 100},
+                    {"key": "render", "label": "Рендер", "status": "running", "progress": 57},
+                    {"key": "audio", "label": "Аудио", "status": "pending", "progress": 0},
+                ],
+            }
+        )
+        app_module._recover_montage_jobs()
+        job = app_module.jobs.get(self.job_id)
+        stages = {s["key"]: s for s in (job.get("operation") or {}).get("stages") or []}
+        self.assertEqual(stages["transcript"]["status"], "completed")
+        self.assertEqual(stages["render"]["status"], "failed")
+        self.assertEqual(stages["audio"]["status"], "skipped")
+
+    def test_interrupted_with_result_file_recovered_as_done(self):
+        (self.workdir / "final.mp4").write_bytes(b"fake-video")
+        self._write_state(
+            status="publishing",
+            stage="published",
+            detail="Публикация",
+            operation={
+                "version": 3,
+                "status": "running",
+                "active_stage": "publish",
+                "progress": 88,
+                "stages": [{"key": "render", "label": "Рендер", "status": "completed", "progress": 100}],
+            },
+            publish_tracking=True,
+            publish_started={"ig": True},
+            publish={"yt": {"kind": "youtube", "video_id": "abc"}},
+            publish_progress={
+                "ig": {"status": "publishing", "progress": 60, "detail": "Отправка"},
+                "yt": {"status": "publishing", "progress": 90, "detail": "Отправка"},
+            },
+        )
+        app_module._recover_montage_jobs()
+        job = app_module.jobs.get(self.job_id)
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["detail"], "Публикация прервана перезапуском сервера")
+        self.assertEqual((job.get("operation") or {}).get("status"), "failed")
+        statuses = job.get("publish_status") or {}
+        self.assertEqual(statuses.get("yt"), "published")
+        self.assertEqual(statuses.get("ig"), "unknown")
+        self.assertIn("ig", job.get("publish_unknown") or {})
+        self.assertNotIn("ig", job.get("publish_errors") or {})
 
     def test_unfinished_job_is_persisted_after_recovery(self):
         self._write_state()
         app_module._recover_montage_jobs()
         saved = json.loads((self.workdir / "job_state.json").read_text(encoding="utf-8"))
-        self.assertEqual(saved["status"], "done")
+        self.assertEqual(saved["status"], "failed")
         self.assertEqual((saved.get("operation") or {}).get("status"), "failed")
+
+    def test_recover_publish_outcomes_classification(self):
+        job = {
+            "last_publish_targets": [{"id": "ig"}, {"id": "fb"}, {"id": "yt"}, {"id": "tg"}],
+            "publish_tracking": True,
+            "publish_started": {"ig": True},
+            "publish": {"yt": {"kind": "youtube", "video_id": "abc"}},
+            "publish_status": {"fb": "failed"},
+            "publish_progress": {
+                "ig": {"status": "publishing", "progress": 40, "detail": "Отправка"},
+                "fb": {"status": "error", "progress": 100, "detail": "quota"},
+                "yt": {"status": "publishing", "progress": 70, "detail": "Отправка"},
+            },
+        }
+        app_module._recover_publish_outcomes(job)
+        statuses = job["publish_status"]
+        self.assertEqual(statuses["ig"], "unknown")
+        self.assertEqual(statuses["fb"], "failed")
+        self.assertEqual(statuses["yt"], "published")
+        self.assertEqual(statuses["tg"], "failed")
+        self.assertIn("ig", job["publish_unknown"])
+        self.assertIn("fb", job["publish_errors"])
+        self.assertEqual(job["publish_progress"]["ig"]["status"], "unknown")
+        self.assertIsNone(job["publish_progress"]["ig"]["progress"])
+        self.assertEqual(job["publish_progress"]["yt"]["status"], "done")
+        self.assertEqual(job["publish_progress"]["yt"]["progress"], 100)
+
+    def test_recover_publish_outcomes_legacy_is_unknown(self):
+        job = {
+            "last_publish_targets": [{"id": "ig"}, {"id": "yt"}],
+            "publish_progress": {"ig": {"status": "publishing", "progress": 30}},
+        }
+        app_module._recover_publish_outcomes(job)
+        self.assertEqual(job["publish_status"]["ig"], "unknown")
+        self.assertEqual(job["publish_status"]["yt"], "unknown")
+        self.assertEqual(set(job["publish_unknown"]), {"ig", "yt"})
 
     def test_completed_job_kept_intact(self):
         self._write_state(status="done", stage="published", operation={"version": 4, "status": "completed", "progress": 100, "stages": []})

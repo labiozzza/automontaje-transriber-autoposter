@@ -1345,6 +1345,71 @@ def _save_montage_job(job_id: str) -> None:
     os.replace(temporary, target)
 
 
+def _recover_publish_outcomes(job: dict) -> None:
+    """Classify per-platform publish outcomes after an interrupted publish.
+
+    Serves two purposes (task 2):
+
+    * preserved confirmed successes: a platform already reported as published
+      is kept published with its ids/links; it is never silently republished;
+    * distinguishing the three outcome kinds used after a restart:
+      published / failed / unknown.  A target whose outcome could not be
+      determined (started but no terminal event was persisted, or a legacy
+      job that predates per-target tracking) stays in an explicit *unknown*
+      state that the UI shows as "requires manual check" and that is NOT
+      retried without an explicit user decision.
+    """
+    progress = dict(job.get("publish_progress") or {})
+    statuses = dict(job.get("publish_status") or {})
+    errors = dict(job.get("publish_errors") or {})
+    unknown = dict(job.get("publish_unknown") or {})
+    started = set((job.get("publish_started") or {}).keys())
+    legacy = not bool(job.get("publish_tracking"))
+    confirmed = dict(job.get("publish") or {})
+    for target in job.get("last_publish_targets") or []:
+        tid = str(target.get("id") or target.get("kind") or "")
+        if not tid:
+            continue
+        item = progress.get(tid) or {}
+        state = statuses.get(tid)
+        if state == "published" or item.get("status") == "done" or tid in confirmed:
+            statuses[tid] = "published"
+        elif state == "failed" or item.get("status") == "error":
+            statuses[tid] = "failed"
+            errors.setdefault(tid, item.get("detail") or "Публикация не выполнена")
+        elif state == "unknown" or item.get("status") == "unknown":
+            statuses[tid] = "unknown"
+            unknown.setdefault(tid, item.get("detail") or "Результат публикации неизвестен")
+        elif legacy or tid in started:
+            statuses[tid] = "unknown"
+            unknown[tid] = (
+                "Результат неизвестен: сервер перезапущен во время публикации; "
+                "проверьте публикацию вручную"
+            )
+        else:
+            statuses[tid] = "failed"
+            errors[tid] = "Публикация не начата до перезапуска сервера — можно повторить"
+    for tid, state in statuses.items():
+        item = progress.get(tid)
+        if item is not None:
+            item["status"] = {
+                "published": "done", "failed": "error", "unknown": "unknown",
+            }.get(state, str(item.get("status") or "unknown"))
+            if state == "published":
+                item["progress"] = 100
+                item["detail"] = item.get("detail") or "Опубликовано"
+            elif state == "unknown":
+                item["progress"] = None
+                item["detail"] = unknown.get(tid) or item.get("detail") or "Результат неизвестен"
+            else:
+                item["progress"] = 100
+                item["detail"] = errors.get(tid) or item.get("detail") or "Публикация не выполнена"
+    job["publish_status"] = statuses
+    job["publish_errors"] = errors
+    job["publish_unknown"] = unknown
+    job["publish_progress"] = progress
+
+
 def _recover_montage_jobs() -> None:
     root = MONTAGE_WORK.resolve()
     workdirs = sorted(
@@ -1359,41 +1424,58 @@ def _recover_montage_jobs() -> None:
         if state_path.is_file():
             try:
                 job = json.loads(state_path.read_text(encoding="utf-8"))
-                if job.get("kind") == "montage" and (job.get("result") or {}).get("result_video"):
-                    if str(job.get("id") or "") != workdir.name:
-                        continue
-                    recovered_after_interruption = False
+                if job.get("kind") != "montage":
+                    continue
+                if str(job.get("id") or "") != workdir.name:
+                    continue
+                recovered_after_interruption = False
+                in_flight = job.get("status") in {"processing", "publishing"}
+                if in_flight:
+                    recovered_after_interruption = True
+                    recovered_id = str(job.get("id") or "")
                     if not job.get("selected_cover_id"):
                         prepared_cover = next((workdir / "covers").glob(".*-instagram.jpg"), None)
                         if prepared_cover:
                             job["selected_cover_id"] = prepared_cover.name[1:].split("-instagram.", 1)[0]
-                    if job.get("status") in {"processing", "publishing"}:
+                    message = "Монтаж прерван перезапуском сервера"
+                    result_path = (job.get("result") or {}).get("result_video")
+                    has_result = bool(result_path) and Path(str(result_path)).is_file()
+                    if has_result:
+                        # The render finished; publication (if any) was interrupted.
                         job["status"] = "done"
                         job["stage"] = "done"
-                        job["detail"] = "Задание восстановлено после перезапуска"
-                        if isinstance(job.get("operation"), dict):
-                            interrupted = job["operation"].get("status") in {"running", "pending"}
-                            job["operation"] = failed_snapshot(
-                                job["operation"],
-                                "Операция прервана перезапуском сервера",
-                            ) if interrupted else job["operation"]
-                        targets = job.get("last_publish_targets") or []
-                        job["publish_errors"] = {
-                            str(item.get("id")): "Попытка была прервана перезапуском; повторите публикацию"
-                            for item in targets if item.get("id")
-                        }
-                        recovered_after_interruption = True
-                    recovered_id = str(job["id"])
-                    if job.get("status") in {"processing", "publishing"}:
-                        # (defensive) never advertise an in-flight job after restart
-                        job["status"] = "done"
-                    jobs[recovered_id] = job
-                    if recovered_after_interruption:
-                        _save_montage_job(recovered_id)
+                        job["detail"] = "Публикация прервана перезапуском сервера"
+                        operation = job.get("operation")
+                        if isinstance(operation, dict) and operation.get("status") in {"running", "pending"}:
+                            job["operation"] = failed_snapshot(operation, message)
+                        _recover_publish_outcomes(job)
+                        _run_cleanup_safely(_cleanup_render_artifacts, recovered_id, job)
+                        if not job.get("publish_errors") and not job.get("publish_unknown"):
+                            _run_cleanup_safely(_cleanup_publish_artifacts, recovered_id, job)
+                    else:
+                        # Render was interrupted before a finished video existed: never
+                        # advertise it as completed without a real result (task 1).
+                        job["status"] = "failed"
+                        job["stage"] = "interrupted"
+                        job["detail"] = message
+                        job["error"] = message
+                        try:
+                            job["progress"] = min(float(job.get("progress") or 0), 99.0)
+                        except (TypeError, ValueError):
+                            job["progress"] = 0
+                        job["result"] = None
+                        operation = job.get("operation")
+                        if isinstance(operation, dict) and operation.get("status") != "failed":
+                            job["operation"] = failed_snapshot(operation, message)
+                recovered_id = str(job["id"])
+                jobs[recovered_id] = job
+                if recovered_after_interruption:
+                    _save_montage_job(recovered_id)
+                if not in_flight:
                     _run_cleanup_safely(_cleanup_render_artifacts, recovered_id, job)
-                    if job.get("stage") == "published" and not job.get("publish_errors"):
+                    if job.get("stage") == "published" and not job.get("publish_errors") and not job.get("publish_unknown"):
                         _run_cleanup_safely(_cleanup_publish_artifacts, recovered_id, job)
-                    continue
+                continue
             except Exception:
                 pass
 
@@ -1687,8 +1769,17 @@ async def process_publish(job_id: str, targets: list):
         previous_publish = dict(job.get("publish") or {})
         job["status"] = "publishing"
         job["error"] = None
-        job["publish"] = previous_publish or None
-        job["publish_errors"] = None
+        job["publish"] = dict(previous_publish)
+        job["publish_status"] = dict(job.get("publish_status") or {})
+        job["publish_started"] = dict(job.get("publish_started") or {})
+        job["publish_unknown"] = dict(job.get("publish_unknown") or {})
+        job["publish_errors"] = dict(job.get("publish_errors") or {})
+        job["publish_tracking"] = True
+        for target in targets:
+            target_id = str(target.get("id") or target.get("kind") or "")
+            if target_id:
+                job["publish_unknown"].pop(target_id, None)
+                job["publish_errors"].pop(target_id, None)
         job["publish_progress"] = {
             str(target["id"]): {
                 "label": str(target.get("label") or target["id"]),
@@ -1774,8 +1865,39 @@ async def process_publish(job_id: str, targets: list):
         def target_progress(target_id: str, percent: float, detail: str, status: str) -> None:
             def update() -> None:
                 item = job["publish_progress"].get(target_id)
-                if item is not None:
-                    item.update(progress=round(percent, 1), detail=detail, status=status)
+                if item is None:
+                    return
+                previous = item.get("status")
+                item.update(
+                    progress=None if status == "unknown" else round(percent, 1),
+                    detail=detail, status=status,
+                )
+                if status == "done":
+                    job["publish_status"][target_id] = "published"
+                    job["publish_errors"].pop(target_id, None)
+                    job["publish_unknown"].pop(target_id, None)
+                elif status == "error":
+                    job["publish_status"][target_id] = "failed"
+                    job["publish_errors"][target_id] = detail
+                    job["publish_unknown"].pop(target_id, None)
+                elif status == "unknown":
+                    job["publish_status"][target_id] = "unknown"
+                    job["publish_unknown"][target_id] = detail
+                    job["publish_errors"].pop(target_id, None)
+                started = (status == "publishing" and previous == "queued")
+                if started:
+                    job["publish_started"][target_id] = True
+                if status in {"done", "error", "unknown"} or started:
+                    _save_montage_job(job_id)
+            loop.call_soon_threadsafe(update)
+
+        def confirmed_publish(target_id: str, result_data: dict) -> None:
+            def update() -> None:
+                job["publish_status"][target_id] = "published"
+                job["publish"][target_id] = dict(result_data)
+                job["publish_errors"].pop(target_id, None)
+                job["publish_unknown"].pop(target_id, None)
+                _save_montage_job(job_id)
             loop.call_soon_threadsafe(update)
 
         result = await asyncio.to_thread(
@@ -1789,30 +1911,71 @@ async def process_publish(job_id: str, targets: list):
             targets=targets,
             progress_cb=publish_progress,
             target_progress_cb=target_progress,
+            confirmed_cb=confirmed_publish,
             log_cb=lambda message: asyncio.run_coroutine_threadsafe(
                 _montage_announce(job_id, message), loop
             ),
         )
         publish_results = dict(result.get("results") or {})
-        publish_errors = dict(result.get("errors") or {})
+        engine_errors = dict(result.get("errors") or {})
         expected_targets = {str(target.get("id") or target.get("kind") or "") for target in targets}
-        for missing in expected_targets - publish_results.keys() - publish_errors.keys():
+        for missing in expected_targets - set(publish_results) - set(engine_errors):
             if missing:
-                publish_errors[missing] = "Публикация не вернула результат"
+                engine_errors[missing] = "Публикация не вернула результат"
+        for target_id, error_text in engine_errors.items():
+            if str(error_text).startswith("AMBIGUOUS_MEDIA_PUBLISH"):
+                job["publish_status"][target_id] = "unknown"
+                job["publish_unknown"][target_id] = error_text
+                job["publish_errors"].pop(target_id, None)
+            else:
+                job["publish_status"][target_id] = "failed"
+                job["publish_errors"][target_id] = error_text
+        for target_id in publish_results:
+            job["publish_status"][target_id] = "published"
+            job["publish_errors"].pop(target_id, None)
+            job["publish_unknown"].pop(target_id, None)
+        for target_id in expected_targets:
+            if job["publish_status"].get(target_id) in {None, "queued", "preparing", "publishing"}:
+                job["publish_status"][target_id] = "failed"
+                job["publish_errors"].setdefault(target_id, "Публикация не вернула результат")
+        terminal_status = {"published": "done", "failed": "error", "unknown": "unknown"}
+        for target_id in expected_targets:
+            item = job["publish_progress"].get(target_id)
+            if item is None:
+                continue
+            state = job["publish_status"].get(target_id) or "failed"
+            item["status"] = terminal_status.get(state, "error")
+            if state == "published":
+                item.update(progress=100, detail="Опубликовано")
+            elif state == "unknown":
+                item.update(progress=None, detail=job["publish_unknown"].get(target_id) or "Результат публикации неизвестен")
+            else:
+                item.update(progress=100, detail=item.get("detail")
+                            or job["publish_errors"].get(target_id) or "Публикация не выполнена")
+        current_errors = {k: v for k, v in job["publish_errors"].items() if k in expected_targets}
+        current_unknown = {k: v for k, v in job["publish_unknown"].items() if k in expected_targets}
         job["status"] = "done"
         job["progress"] = 100
         job["stage"] = "published"
         job["publish"] = {**previous_publish, **publish_results}
-        job["publish_errors"] = publish_errors
-        detail = "Публикация завершена" if not job["publish_errors"] else "Публикация завершена с ошибками"
+        if current_errors and current_unknown:
+            detail = "Публикация завершена с ошибками; часть результатов требует ручной проверки"
+        elif current_unknown:
+            detail = "Публикация завершена; часть результатов требует ручной проверки"
+        elif current_errors:
+            detail = "Публикация завершена с ошибками"
+        else:
+            detail = "Публикация завершена"
         job["detail"] = detail
         _save_montage_job(job_id)
-        if not job["publish_errors"]:
+        if not current_errors and not current_unknown:
             _run_cleanup_safely(_cleanup_publish_artifacts, job_id, job)
         await broadcast_progress(job_id, 100, "published", detail)
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
+        if job.get("last_publish_targets"):
+            _recover_publish_outcomes(job)
         _save_montage_job(job_id)
         await broadcast_progress(job_id, 0, "error", str(e))
 
@@ -2432,6 +2595,10 @@ async def publish_montage(
         raise HTTPException(400, f"Неизвестные цели публикации: {', '.join(unknown)}")
     if not new_publication:
         already_published = set((job.get("publish") or {}).keys())
+        already_published |= {
+            target_id for target_id, state in (job.get("publish_status") or {}).items()
+            if state == "published"
+        }
         target_ids = [target_id for target_id in target_ids if target_id not in already_published]
         if not target_ids:
             raise HTTPException(400, "Все выбранные цели уже успешно опубликованы")
@@ -2514,6 +2681,8 @@ async def montage_result(job_id: str):
         "result": job.get("result"),
         "publish": job.get("publish"),
         "publish_errors": job.get("publish_errors"),
+        "publish_unknown": job.get("publish_unknown"),
+        "publish_status": job.get("publish_status"),
         "publish_progress": job.get("publish_progress"),
         "covers": job.get("covers") or [],
         "cover_status": job.get("cover_status") or "idle",

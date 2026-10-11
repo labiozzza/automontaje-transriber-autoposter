@@ -4,7 +4,9 @@ Covers spec items: no duplicate progress bars, main bar reflects the active
 operation, indeterminate progress, stage errors are surfaced (not masked),
 partial publish shown as «Частично завершено», per-target progress, switching
 operations keeps montage state, concurrent operations, stale-version guard,
-and transcription defaults actually sent to the server.
+all-failed publish shown as «Ошибка публикации» (never masked as partial),
+unknown outcomes require manual check, interrupted montage surfaces an error
+after refresh, and transcription defaults actually sent to the server.
 
 Run (server must be listening on :8000):
   python test_progress_ui.py
@@ -105,6 +107,58 @@ def main():
         check("partial label частично", page.locator("#operationsBody .ops-op-warn").count() >= 1)
         check("targets listed", page.locator("#operationsBody .ops-stage").count() >= 2)
         page.screenshot(path=str(SHOT_DIR / "ops_partial_publish.png"))
+
+        # 7b. all-failed publish -> «Ошибка публикации», never «Частично завершено»
+        inject(page, {"publish_progress": {
+            "ig": {"label": "Instagram", "progress": 100, "status": "error", "detail": "Квота"},
+            "yt": {"label": "YouTube", "progress": 100, "status": "error", "detail": "Сеть"},
+        }})
+        body7b = page.text_content("#operationsBody")
+        check("all-failed title", 'Ошибка публикации' == page.text_content("#operationTitle"),
+              page.text_content("#operationTitle"))
+        check("all-failed status text", "Ошибка публикации" in body7b, body7b)
+        check("all-failed not partial", "Частично завершено" not in body7b, body7b)
+        check("all-failed error row", page.locator("#operationsBody .ops-op-error").count() >= 1)
+        check("all-failed warning", "Ни одна площадка" in page.text_content("#operationDetail"),
+              page.text_content("#operationDetail"))
+
+        # 7c. mixed done/error/unknown -> needs manual check, no auto-republish
+        inject(page, {"publish_progress": {
+            "ig": {"label": "Instagram", "progress": 100, "status": "done", "detail": "Опубликовано"},
+            "yt": {"label": "YouTube", "progress": 100, "status": "error", "detail": "Квота"},
+            "tg": {"label": "Telegram", "progress": None, "status": "unknown", "detail": "Результат неизвестен"},
+        }})
+        body7c = page.text_content("#operationsBody")
+        check("mixed needs-check title", "Требуется проверка" == page.text_content("#operationTitle"),
+              page.text_content("#operationTitle"))
+        check("mixed status text", "Требуется проверка" in body7c, body7c)
+        check("mixed counts", "Опубликовано 1 из 3" in page.text_content("#operationDetail")
+              and "нужна проверка: 1" in page.text_content("#operationDetail"),
+              page.text_content("#operationDetail"))
+        check("unknown target indeterminate", page.locator("#operationsBody .ops-op-bar.ind").count() >= 1)
+        check("unknown target warn dot", page.locator("#operationsBody .ops-stage .dot.warn").count() >= 1)
+        page.screenshot(path=str(SHOT_DIR / "ops_unknown_publish.png"))
+
+        # 7d. interrupted montage after refresh -> error surfaced, start re-enabled
+        page.evaluate("""() => {
+          const orig = window.fetch;
+          window.fetch = (url) => {
+            if (String(url).includes('/api/montage/result/')) {
+              return Promise.resolve({ok: true, json: () => Promise.resolve({
+                status: 'failed', stage: 'interrupted', progress: 57,
+                detail: 'Монтаж прерван перезапуском сервера',
+                error: 'Монтаж прерван перезапуском сервера',
+              })});
+            }
+            return orig(url);
+          };
+          activateMontageJob('ui_interrupted_test');
+          window.fetch = orig;
+        }""")
+        page.wait_for_timeout(300)
+        check("interrupt message shown", "Монтаж прерван перезапуском сервера" in page.text_content("#montageErrorBox"),
+              page.text_content("#montageErrorBox"))
+        check("interrupt start re-enabled", page.locator("#montageStartBtn").is_enabled())
 
         # 8. concurrent operations (montage + drawings)
         inject(page, {

@@ -84,6 +84,7 @@ h1 {
 .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; }
 .badge.ok { background: rgba(0,184,148,0.15); color: var(--green); }
 .badge.no { background: rgba(225,112,85,0.15); color: var(--red); }
+.badge.warn { background: rgba(232,163,61,0.15); color: #e8a33d; }
 .badge.up { background: rgba(167,139,250,0.15); color: var(--accent2); }
 .badge-link { background: rgba(167,139,250,0.15); color: var(--accent2); border: 1px solid rgba(167,139,250,0.4); border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 700; cursor: pointer; margin-right: 4px; }
 .badge-link:hover { background: rgba(167,139,250,0.3); }
@@ -134,6 +135,7 @@ h1 {
 .publish-live-fill { height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg,var(--accent),var(--accent2)); transition: width .3s ease; }
 .publish-live-item.done .publish-live-fill { background: var(--green); }
 .publish-live-item.error .publish-live-fill { background: var(--red); }
+.publish-live-fill.ind { width: 40%; background: repeating-linear-gradient(45deg, rgba(255,255,255,.22) 0 8px, transparent 8px 16px), linear-gradient(90deg,var(--accent),var(--accent2)); animation: opsIndeterminate 1.2s linear infinite; }
 .publish-live-detail { margin-top: 6px; color: var(--text2); font-size: 11px; overflow-wrap: anywhere; }
 .cover-status { margin-top: 14px; color: var(--text2); font-size: 12px; }
 .cover-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
@@ -2224,6 +2226,16 @@ document.addEventListener('change', (e) => {
       if (window.__projectOverlay) window.__projectOverlay.refresh();
     }
   }
+  if (e.target && e.target.classList && e.target.classList.contains('publish-target-checkbox')) {
+    const publishButton = document.getElementById('montagePublishBtn');
+    const anyChecked = document.querySelectorAll('.publish-target-checkbox:checked').length > 0;
+    publishButton.disabled = !anyChecked;
+    if (anyChecked && !window.__forceNewPublication) {
+      const selected = [...document.querySelectorAll('.publish-target-checkbox:checked')].map(cb => cb.value);
+      const failedCount = (window.__publishFailed || []).filter(tid => selected.includes(tid)).length;
+      publishButton.textContent = failedCount ? 'Повторить ошибки' : 'Начать публикацию';
+    }
+  }
 });
 
 async function refreshProjects() {
@@ -3916,8 +3928,17 @@ function opStatusLabel(status) {
   const map = { pending: 'в очереди', running: 'выполняется', completed: 'готово', failed: 'ошибка',
     skipped: 'пропущено', cancelled: 'отменено', done: 'готово', error: 'ошибка', generating: 'выполняется',
     publishing: 'выполняется', processing: 'выполняется', queued: 'в очереди', preparing: 'подготовка',
-    partial: 'частично завершено', idle: 'не запускалось', uploaded: 'загружено' };
+    partial: 'частично завершено', idle: 'не запускалось', uploaded: 'загружено',
+    unknown: 'требуется проверка', needs_check: 'требуется проверка', waiting: 'ожидание',
+    interrupted: 'прервано' };
   return map[status] || status;
+}
+
+function publishStatusText(status) {
+  const map = { done: 'Опубликовано', partial: 'Частично завершено', error: 'Ошибка публикации',
+    needs_check: 'Требуется проверка', unknown: 'Требуется проверка', waiting: 'Ожидание',
+    publishing: 'Выполняется', queued: 'В очереди', preparing: 'Подготовка', failed: 'Ошибка публикации' };
+  return map[status] || opStatusLabel(status);
 }
 
 function opsStageRow(stage) {
@@ -3935,11 +3956,11 @@ function opsStageRow(stage) {
 
 function opsOpBlock(op) {
   let cls = '';
-  if (op.warning) cls = ' ops-op-warn';
-  else if (op.status === 'error' || op.status === 'failed') cls = ' ops-op-error';
+  if (op.status === 'error' || op.status === 'failed') cls = ' ops-op-error';
+  else if (op.warning) cls = ' ops-op-warn';
   let html = '<div class="ops-op">';
   html += '<div class="ops-op-head"><span>' + esc(op.label) + '</span>';
-  const statusText = opStatusLabel(op.status || '');
+  const statusText = op.key === 'publish' ? publishStatusText(op.status || '') : opStatusLabel(op.status || '');
   html += '<span class="' + cls + '" style="margin-left:auto;font-size:12px;color:var(--text2)">' + esc(statusText) + '</span>';
   html += '<span style="font-size:12px;color:var(--accent2);min-width:40px;text-align:right">' + (op.progress == null ? '…' : Math.round(op.progress) + '%') + '</span></div>';
   if (op.progress == null) {
@@ -3954,7 +3975,7 @@ function opsOpBlock(op) {
   if (op.stages) html += '<div style="margin-top:8px">' + op.stages.map(opsStageRow).join('') + '</div>';
   if (op.targets && op.targets.length) {
     html += '<div style="margin-top:6px">' + op.targets.map(function(t) {
-      const td = t.status === 'done' ? 'done' : (t.status === 'error' ? 'fail' : (t.status === 'queued' ? '' : 'running'));
+      const td = t.status === 'done' ? 'done' : (t.status === 'error' ? 'fail' : (t.status === 'unknown' ? 'warn' : (t.status === 'queued' ? '' : 'running')));
       return '<div class="ops-stage"><span class="dot ' + td + '"></span>'
         + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(t.label || t.id) + '</span>'
         + '<span style="color:var(--text2);font-size:12px">' + esc(t.detail || opStatusLabel(t.status)) + '</span></div>';
@@ -3965,9 +3986,24 @@ function opsOpBlock(op) {
 
 function targetProgressPercent(target) {
   if (target.status === 'done' || target.status === 'error') return 100;
+  if (target.status === 'unknown') return null;
   if (target.progress != null) return Number(target.progress) || 0;
   if (target.status === 'queued' || target.status === 'preparing' || target.status === 'publishing') return null;
   return 0;
+}
+
+function aggregatePublishStatus(targets) {
+  if (!targets.length) return 'waiting';
+  const doneCount = targets.filter(t => t.status === 'done').length;
+  const failedCount = targets.filter(t => t.status === 'error').length;
+  const unknownCount = targets.filter(t => t.status === 'unknown').length;
+  const activeCount = targets.filter(t => ['queued', 'preparing', 'publishing'].includes(t.status)).length;
+  if (activeCount) return 'publishing';
+  if (unknownCount) return 'needs_check';
+  if (doneCount === targets.length) return 'done';
+  if (doneCount === 0) return 'error';
+  if (doneCount + failedCount === targets.length) return 'partial';
+  return 'publishing';
 }
 
 function buildOpsState(state) {
@@ -3996,25 +4032,29 @@ function buildOpsState(state) {
   }
   if (state.publish_progress) {
     const targets = Object.values(state.publish_progress);
-    const anyIndeterminate = targets.some(function(t) { return targetProgressPercent(t) === null; });
-    const known = targets.map(function(t) { const p = targetProgressPercent(t); return p === null ? 0 : p; });
-    const values = targets.map(function(t) { const p = targetProgressPercent(t); return p === null ? 0 : p; });
-    const average = values.length ? values.reduce(function(a, b) { return a + b; }, 0) / values.length : 0;
+    const values = targets.map(function(t) { return targetProgressPercent(t); });
+    const anyIndeterminate = values.indexOf(null) !== -1;
+    const known = values.filter(function(v) { return v !== null; });
+    const average = targets.length ? known.reduce(function(a, b) { return a + b; }, 0) / targets.length : 0;
     const doneCount = targets.filter(function(t) { return t.status === 'done'; }).length;
-    const errorCount = targets.filter(function(t) { return t.status === 'error'; }).length;
-    let status = 'publishing';
-    if (doneCount === targets.length) status = 'done';
-    else if (errorCount && doneCount + errorCount === targets.length) status = 'partial';
+    const failedCount = targets.filter(function(t) { return t.status === 'error'; }).length;
+    const unknownCount = targets.filter(function(t) { return t.status === 'unknown'; }).length;
+    const status = aggregatePublishStatus(targets);
     const detailBits = ['Опубликовано ' + doneCount + ' из ' + targets.length];
-    if (errorCount) detailBits.push('ошибок: ' + errorCount);
+    if (failedCount) detailBits.push('ошибок: ' + failedCount);
+    if (unknownCount) detailBits.push('нужна проверка: ' + unknownCount);
+    let warning = '';
+    if (status === 'needs_check') warning = 'Результат некоторых публикаций неизвестен — проверьте вручную';
+    else if (status === 'error') warning = 'Ни одна площадка не опубликована';
+    else if (status === 'partial') warning = 'Не все площадки опубликованы';
     ops.push({ key: 'publish', label: 'Публикация', status: status,
       progress: anyIndeterminate ? null : average, detail: detailBits.join(' · '),
-      error: '', warning: status === 'partial' ? 'Не все площадки опубликованы' : '', stages: null, targets: targets });
+      warning: warning, stages: null, targets: targets });
   }
   return ops;
 }
 
-const OPS_ACTIVE_STATUSES = ['publishing', 'preparing', 'processing', 'running', 'generating', 'queued', 'partial'];
+const OPS_ACTIVE_STATUSES = ['publishing', 'preparing', 'processing', 'running', 'generating', 'queued', 'partial', 'needs_check', 'unknown', 'error'];
 function pickMainOp(ops) {
   if (!ops.length) return null;
   const order = ['publish', 'montage', 'covers', 'drawings'];
@@ -4049,7 +4089,15 @@ function renderOperations(state) {
   const main = pickMainOp(ops);
   if (main) {
     let title = main.label;
-    if (main.key === 'montage' && (main.status === 'done' || main.status === 'completed') && !main.warning) title = 'Видео готово';
+    if (main.key === 'publish') {
+      if (main.status === 'done' || main.status === 'completed') title = 'Опубликовано';
+      else if (main.status === 'error' || main.status === 'failed') title = 'Ошибка публикации';
+      else if (main.status === 'needs_check' || main.status === 'unknown') title = 'Требуется проверка';
+    }
+    if (main.key === 'montage' && (main.status === 'done' || main.status === 'completed') && !main.warning) {
+      const published = ops.find(function(o) { return o.key === 'publish'; });
+      title = published && published.status === 'done' ? 'Опубликовано' : 'Видео готово';
+    }
     titleEl.textContent = title;
     if (main.error) {
       pctEl.textContent = 'ошибка';
@@ -4117,11 +4165,12 @@ async function refreshMontageResult() {
     }
     renderCoverState(data);
     document.getElementById('montageStartBtn').disabled = true;
-    if (data.status === 'error') {
+    const terminalFailure = data.status === 'error' || data.status === 'failed' || data.status === 'interrupted';
+    if (terminalFailure) {
       clearInterval(montagePollTimer);
       montagePollTimer = null;
       montageActive = false;
-      montageError(data.error || 'Ошибка монтажа');
+      montageError(data.error || data.detail || 'Операция не завершилась');
       document.getElementById('montageStartBtn').disabled = false;
       return;
     }
@@ -4220,15 +4269,26 @@ async function refreshMontageResult() {
         box.innerHTML += row;
         modalBox.innerHTML += row;
       }
+      for (const [kind, message] of Object.entries(data.publish_unknown || {})) {
+        const row = `<div><span class="badge warn">${esc(kind)}: нужна ручная проверка</span> ${esc(message)}</div>`;
+        box.innerHTML += row;
+        modalBox.innerHTML += row;
+      }
+      window.__publishFailed = Object.keys(data.publish_errors || {});
+      window.__publishUnknown = Object.keys(data.publish_unknown || {});
       if (data.status !== 'publishing') {
         const failedTargets = Object.keys(data.publish_errors || {});
+        const unknownTargets = Object.keys(data.publish_unknown || {});
         const publishButton = document.getElementById('montagePublishBtn');
+        for (const checkbox of document.querySelectorAll('.publish-target-checkbox')) {
+          checkbox.checked = failedTargets.includes(checkbox.value);
+        }
         if (failedTargets.length) {
-          for (const checkbox of document.querySelectorAll('.publish-target-checkbox')) {
-            checkbox.checked = failedTargets.includes(checkbox.value);
-          }
           publishButton.disabled = false;
           publishButton.textContent = 'Повторить ошибки';
+        } else if (unknownTargets.length) {
+          publishButton.disabled = false;
+          publishButton.textContent = 'Опубликовать выбранные';
         } else {
           publishButton.disabled = true;
           publishButton.textContent = 'Опубликовано';
@@ -4280,6 +4340,14 @@ async function publishMontage() {
   if (!targets.length) {
     publishWindowError('Выберите хотя бы одну цель публикации');
     return;
+  }
+  const unknownSelected = targets.filter(tid => (window.__publishUnknown || []).includes(tid));
+  if (unknownSelected.length) {
+    const confirmed = window.confirm(
+      'Выбранные площадки ранее завершились с неизвестным результатом: ' + unknownSelected.join(', ') +
+      '.\nОтправлять публикацию повторно?'
+    );
+    if (!confirmed) return;
   }
   const title = document.getElementById('montagePublishTitle').value.trim();
   const text = document.getElementById('montagePublishText').value.trim();
@@ -4366,12 +4434,16 @@ function updatePublishCounts() {
 
 function renderPublishProgress(items) {
   const container = document.getElementById('montagePublishLiveProgress');
-  const statusNames = {queued:'В очереди',preparing:'Подготовка',publishing:'Публикация',done:'Готово',error:'Ошибка'};
+  const statusNames = {queued:'В очереди',preparing:'Подготовка',publishing:'Публикация',done:'Готово',error:'Ошибка',unknown:'Результат неизвестен'};
   container.innerHTML = Object.entries(items || {}).map(([id, item]) => {
-    const progress = Math.max(0, Math.min(100, Number(item.progress) || 0));
-    return `<div class="publish-live-item ${esc(item.status || 'queued')}" data-target="${esc(id)}">
-      <div class="publish-live-head"><strong>${esc(item.label || id)}</strong><span>${esc(statusNames[item.status] || item.status)} · ${progress.toFixed(0)}%</span></div>
-      <div class="publish-live-track"><div class="publish-live-fill" style="width:${progress}%"></div></div>
+    const status = item.status || 'queued';
+    const progress = status === 'unknown' ? null : Math.max(0, Math.min(100, Number(item.progress) || 0));
+    const fill = status === 'unknown' ? '<div class="publish-live-fill ind"></div>'
+      : `<div class="publish-live-fill" style="width:${progress}%"></div>`;
+    const percentText = status === 'unknown' ? '—' : progress.toFixed(0) + '%';
+    return `<div class="publish-live-item ${esc(status)}" data-target="${esc(id)}">
+      <div class="publish-live-head"><strong>${esc(item.label || id)}</strong><span>${esc(statusNames[status] || status)} · ${percentText}</span></div>
+      <div class="publish-live-track">${fill}</div>
       <div class="publish-live-detail">${esc(item.detail || '')}</div>
     </div>`;
   }).join('');
