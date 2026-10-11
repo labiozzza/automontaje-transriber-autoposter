@@ -8,6 +8,7 @@ projects.json
 transcription_jobs/
 montage_work/
 central_work/
+outputs/
 instagram-media/
 config/secrets*.json
 montage/instaposter/client_secret.json

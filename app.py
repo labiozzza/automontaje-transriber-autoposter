@@ -319,12 +319,45 @@ async def broadcast_operation(job_id: str, snapshot: dict):
     job = jobs.get(job_id)
     if job:
         job["operation"] = snapshot
+        # Persist only meaningful transitions (status / active stage / stage
+        # status changes) so a server restart can restore the last known state
+        # without writing to disk on every progress tick (spec 4.3).
+        signature = _operation_signature(snapshot)
+        if _OPERATION_SAVE_SIGNATURES.get(job_id) != signature:
+            _OPERATION_SAVE_SIGNATURES[job_id] = signature
+            try:
+                _save_montage_job(job_id)
+            except Exception:
+                pass
         q = job_queues.get(job_id)
         if q:
             try:
                 await q.put({"type": "operation", "operation": snapshot})
             except Exception:
                 pass
+
+
+def _operation_signature(snapshot: dict) -> tuple:
+    stages = snapshot.get("stages") or []
+    return (
+        snapshot.get("status"),
+        snapshot.get("active_stage"),
+        tuple((s.get("key"), s.get("status")) for s in stages),
+    )
+
+
+_OPERATION_SAVE_SIGNATURES: dict[str, tuple] = {}
+
+
+def mark_operation_failed(job_id: str, error: str) -> Optional[dict]:
+    """Record a coherent failed operation state for *job_id* (spec 1.2)."""
+    job = jobs.get(job_id)
+    if not job:
+        return None
+    snap = failed_snapshot(job.get("operation"), error)
+    job["operation"] = snap
+    _OPERATION_SAVE_SIGNATURES[job_id] = _operation_signature(snap)
+    return snap
 
 
 async def process_job(job_id: str, params: dict):
@@ -963,6 +996,7 @@ load_secrets_env()
 from montage import engine as montage_engine
 from montage import cover_generator
 from montage import drawing_generator
+from montage.progress_tracker import failed_snapshot
 
 _drawing_generation_lock = asyncio.Lock()
 _drawing_generation_jobs: dict[str, dict[str, Any]] = {}
@@ -1337,6 +1371,12 @@ def _recover_montage_jobs() -> None:
                         job["status"] = "done"
                         job["stage"] = "done"
                         job["detail"] = "Задание восстановлено после перезапуска"
+                        if isinstance(job.get("operation"), dict):
+                            interrupted = job["operation"].get("status") in {"running", "pending"}
+                            job["operation"] = failed_snapshot(
+                                job["operation"],
+                                "Операция прервана перезапуском сервера",
+                            ) if interrupted else job["operation"]
                         targets = job.get("last_publish_targets") or []
                         job["publish_errors"] = {
                             str(item.get("id")): "Попытка была прервана перезапуском; повторите публикацию"
@@ -1344,6 +1384,9 @@ def _recover_montage_jobs() -> None:
                         }
                         recovered_after_interruption = True
                     recovered_id = str(job["id"])
+                    if job.get("status") in {"processing", "publishing"}:
+                        # (defensive) never advertise an in-flight job after restart
+                        job["status"] = "done"
                     jobs[recovered_id] = job
                     if recovered_after_interruption:
                         _save_montage_job(recovered_id)
@@ -1544,9 +1587,16 @@ async def process_montage(job_id: str, params: dict):
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
+        job["stage"] = "error"
+        job["detail"] = str(e)
+        operation = mark_operation_failed(job_id, str(e))
         _save_montage_job(job_id)
         print(f"[montage] job {job_id} failed: {traceback.format_exc()}", file=sys.stderr)
-        await broadcast_progress(job_id, 0, "error", str(e))
+        if operation is not None:
+            await broadcast_progress(job_id, operation.get("progress", 0), "error", str(e))
+            await broadcast_operation(job_id, operation)
+        else:
+            await broadcast_progress(job_id, 0, "error", str(e))
 
 
 async def _store_project_covers(job_id: str) -> None:

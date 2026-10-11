@@ -55,6 +55,7 @@ h1 {
 
 .view-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   justify-content: center;
   margin-bottom: 24px;
@@ -390,24 +391,62 @@ select option { background: var(--surface2); }
 }
 
 /* Unified collapsible operations component */
-.ops-header { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
-.ops-summary { font-size: 13px; color: var(--text2); width: 100%; }
-.ops-chevron { margin-left: auto; color: var(--text2); transition: transform .2s ease; }
+.ops-main { display: block; }
+.ops-main-head { display: flex; align-items: center; gap: 10px; }
+.ops-main-title { font-size: 15px; }
+.ops-main-percent { margin-left: auto; font-size: 13px; color: var(--accent2); }
+.ops-main-bar { margin: 10px 0 6px; }
+.ops-main-bar.indeterminate .progress-bar {
+  width: 40% !important;
+  position: relative;
+  animation: opsIndeterminate 1.2s linear infinite;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+}
+@keyframes opsIndeterminate { from { margin-left: -40%; } to { margin-left: 100%; } }
+.ops-main-detail { min-height: 16px; }
+.ops-toggle {
+  margin-top: 10px; background: none; border: none; padding: 4px 0; cursor: pointer;
+  color: var(--accent2); font-size: 13px; font-family: inherit; text-align: left;
+}
+.ops-toggle:hover { text-decoration: underline; }
+.ops-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .ops-body.closed { display: none; }
 .ops-op { border: 1px solid var(--border); background: var(--surface2); border-radius: 9px; padding: 10px; margin-top: 10px; }
 .ops-op-head { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
-.ops-op-bar-wrap { background: rgba(0,0,0,.35); border-radius: 6px; height: 6px; overflow: hidden; margin-top: 8px; }
+.ops-op-bar-wrap { background: rgba(0,0,0,.35); border-radius: 6px; height: 6px; overflow: hidden; margin-top: 8px; position: relative; }
 .ops-op-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 6px; transition: width .3s ease; width: 0%; }
+.ops-op-bar.ind { width: 40%; position: absolute; animation: opsIndeterminate 1.2s linear infinite; }
+.ops-op-warn { color: #f0b429; }
+.ops-op-error { color: var(--red); }
 .ops-stage { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--text2); }
 .ops-stage .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--border); }
 .ops-stage .dot.running { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
 .ops-stage .dot.done { background: var(--green); }
 .ops-stage .dot.fail { background: var(--red); }
+.ops-stage .dot.warn { background: #f0b429; }
 .ops-stage .dot.skip { background: var(--text2); opacity: .5; }
 .ops-stage-bar { flex: 1; background: rgba(0,0,0,.35); border-radius: 4px; height: 4px; overflow: hidden; position: relative; }
 .ops-stage-bar i { display: block; height: 100%; background: var(--accent); transition: width .3s ease; }
-.ops-stage-bar i.ind { width: 40%; position: absolute; animation: opsInd 1.2s linear infinite; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
-@keyframes opsInd { from { left: -40%; } to { left: 100%; } }
+.ops-stage-bar i.ind { width: 40%; position: absolute; animation: opsIndeterminate 1.2s linear infinite; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+
+/* Montage sections (ordered workflow) */
+.montage-section { display: flex; flex-direction: column; gap: 14px; margin-bottom: 22px; }
+.section-eyebrow {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 700; letter-spacing: .02em;
+  color: var(--text2); text-transform: uppercase; margin: 2px 0 0;
+}
+.section-num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; flex: none; border-radius: 50%;
+  background: var(--accent); color: #fff; font-size: 12px; font-weight: 700;
+}
+.dependency-note {
+  margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+  background: var(--surface2); border: 1px solid var(--border);
+  font-size: 12px; color: var(--text2); line-height: 1.45;
+}
+.dependency-note.active { border-color: var(--accent); color: var(--text); }
 
 /* Stage icons */
 .stage-icon { margin-right: 6px; }
@@ -629,7 +668,11 @@ select option { background: var(--surface2); }
   border-radius: 12px;
   letter-spacing: .3px;
   pointer-events: none;
-  white-space: nowrap;
+  max-width: calc(100% - 16px);
+  box-sizing: border-box;
+  white-space: normal;
+  text-align: center;
+  line-height: 1.3;
 }
 
 /* Keybar (zoom / segment timeline) */
@@ -873,6 +916,9 @@ select option { background: var(--surface2); }
   .project-row .actions .btn { flex: 1; }
   .card { padding: 16px; }
   .video-stage { max-width: 340px; }
+  .view-tab { padding: 8px 12px; font-size: 13px; }
+  .montage-section { margin-bottom: 16px; }
+  .section-eyebrow { font-size: 12px; }
 }
 </style>
 </head>
@@ -935,8 +981,8 @@ select option { background: var(--surface2); }
       <div class="setting-group">
         <label>Режим транскрибации</label>
         <select id="modeSelect">
-          <option value="sentences" selected>По предложениям</option>
-          <option value="words">По словам</option>
+          <option value="sentences">По предложениям</option>
+          <option value="words" selected>По словам</option>
         </select>
       </div>
       <div class="setting-group">
@@ -985,7 +1031,7 @@ select option { background: var(--surface2); }
           <div class="toggle-desc">Отображать имена спикеров в тексте</div>
         </div>
         <label class="toggle">
-          <input type="checkbox" id="showSpeakers" checked onchange="refreshDisplay()">
+          <input type="checkbox" id="showSpeakers" onchange="refreshDisplay()">
           <div class="toggle-slider"></div>
         </label>
       </div>
@@ -1041,84 +1087,248 @@ select option { background: var(--surface2); }
   <!-- ======== ТАБ 2: АВТОМОНТАЖ ======== -->
   <div id="viewMontage" class="view">
 
-    <!-- Status -->
-    <div class="card">
-      <div class="card-title">Система</div>
-      <div class="montage-status-row" id="montageStatusRow">Проверка...</div>
-      <div id="montageStatusDetail" style="font-size:13px;color:var(--text2)"></div>
-    </div>
+    <!-- ===== 1. Исходник и проект ===== -->
+    <section class="montage-section" aria-labelledby="secSource">
+      <h2 class="section-eyebrow" id="secSource"><span class="section-num">1</span> Исходник и проект</h2>
 
-    <!-- Projects -->
-    <div class="card">
-      <div class="card-title">Проекты <span id="projectsCount" style="color:var(--text2)"></span></div>
-      <div id="projectsList" style="display:flex;flex-direction:column;gap:8px"></div>
-      <div style="margin-top:10px;font-size:12px;color:var(--text2)">
-        Проект создаётся автоматически после транскрибации загруженного видео. Выберите его, чтобы смонтировать без повторной загрузки файла.
-      </div>
-    </div>
-
-    <!-- Project preview -->
-    <div class="results-container" id="projectPreviewCard">
+      <!-- Status -->
       <div class="card">
-        <div class="card-title">Превью проекта
-          <span style="margin-left:6px;font-size:12px;color:var(--text2)">перетаскивайте субтитры и выбранные наложения</span>
+        <div class="card-title">Система</div>
+        <div class="montage-status-row" id="montageStatusRow">Проверка...</div>
+        <div id="montageStatusDetail" style="font-size:13px;color:var(--text2)"></div>
+      </div>
+
+      <!-- Projects -->
+      <div class="card">
+        <div class="card-title">Проекты <span id="projectsCount" style="color:var(--text2)"></span></div>
+        <div id="projectsList" style="display:flex;flex-direction:column;gap:8px"></div>
+        <div style="margin-top:10px;font-size:12px;color:var(--text2)">
+          Проект создаётся автоматически после транскрибации загруженного видео. Выберите его, чтобы смонтировать без повторной загрузки файла.
         </div>
-        <div class="video-stage">
-          <video id="projectPreviewVideo" playsinline controls preload="metadata"></video>
-          <div class="timeline-animation-preview" id="timelineAnimationPreview"><img class="timeline-animation-item" alt="Кадр анимации таймлайна"></div>
-          <div class="overlay-preview-layer" id="overlayPreviewLayer"></div>
-          <div class="overlay-trash" id="overlayTrash" aria-hidden="true"><span>🗑</span><strong>Удалить наложение</strong></div>
-          <div class="sub-drag-layer">
-            <div class="sub-drag-tip">Левая грань X <span id="projectPreviewSubX">0.12</span> • Y <span id="projectPreviewSubY">0.78</span> • Размер <span id="projectPreviewSubScale">1.00</span></div>
-            <div class="sub-card" id="projectPreviewSubCard"><span class="sub-card-text" id="projectPreviewSubText"></span></div>
+      </div>
+
+      <!-- Input -->
+      <div class="card">
+        <div class="card-title">Исходное видео и текст</div>
+        <div class="upload-zone" id="montageUploadZone">
+          <input type="file" id="montageFileInput" accept="video/*,.mp4,.mov,.mkv,.webm">
+          <div class="upload-icon">🎬</div>
+          <div class="upload-text">Видео (9:16) — перетащите или нажмите</div>
+          <div class="upload-filename" id="montageFileName"></div>
+        </div>
+        <div id="montageProjectSel" style="margin-top:10px;font-size:13px;color:var(--accent2);display:none">
+          Выбран проект: <b id="montageProjectName"></b>
+          <a href="javascript:void(0)" onclick="clearProject()" style="margin-left:8px;color:var(--text2)">✕ отменить</a>
+        </div>
+        <div style="margin-top:12px">
+          <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">
+            Текст: готовый SRT <em style="text-transform:none">(необязательно)</em>
+          </label>
+          <input type="file" id="montageSrtInput" accept=".srt,.txt" style="color:var(--text2)">
+        </div>
+        <div class="toggle-row" style="margin-top:12px">
+          <div>
+            <div class="toggle-label">Использовать транскрибацию</div>
+            <div class="toggle-desc" id="montageTranscriptInfo">Сначала транскрибируйте аудио на вкладке «Транскрибация»</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="montageUseTranscript" checked>
+            <div class="toggle-slider"></div>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 2. Предпросмотр и редактор ===== -->
+    <section class="montage-section" aria-labelledby="secPreview">
+      <h2 class="section-eyebrow" id="secPreview"><span class="section-num">2</span> Предпросмотр и редактор</h2>
+
+      <div class="results-container" id="projectPreviewCard">
+        <div class="card">
+          <div class="card-title">Превью проекта
+            <span style="margin-left:6px;font-size:12px;color:var(--text2)">перетаскивайте субтитры и выбранные наложения</span>
+          </div>
+          <div class="video-stage">
+            <video id="projectPreviewVideo" playsinline controls preload="metadata"></video>
+            <div class="timeline-animation-preview" id="timelineAnimationPreview"><img class="timeline-animation-item" alt="Кадр анимации таймлайна"></div>
+            <div class="overlay-preview-layer" id="overlayPreviewLayer"></div>
+            <div class="overlay-trash" id="overlayTrash" aria-hidden="true"><span>🗑</span><strong>Удалить наложение</strong></div>
+            <div class="sub-drag-layer">
+              <div class="sub-drag-tip">Левая грань X <span id="projectPreviewSubX">0.12</span> • Y <span id="projectPreviewSubY">0.78</span> • Размер <span id="projectPreviewSubScale">1.00</span></div>
+              <div class="sub-card" id="projectPreviewSubCard"><span class="sub-card-text" id="projectPreviewSubText"></span></div>
+            </div>
+          </div>
+          <div class="timebar-scale">
+            <span id="projectPreviewCur">00:00.000</span>
+            <span id="projectPreviewDur">00:00.000</span>
+          </div>
+          <div class="keybar" id="projectPreviewKeybar">
+            <div id="projectPreviewMarkers"></div>
+            <div id="projectPreviewPlayhead" class="keybar-playhead"></div>
           </div>
         </div>
-        <div class="timebar-scale">
-          <span id="projectPreviewCur">00:00.000</span>
-          <span id="projectPreviewDur">00:00.000</span>
-        </div>
-        <div class="overlay-timeline-wrap">
-          <div class="overlay-timeline" id="overlayTimeline"><div class="overlay-timeline-empty">Добавьте картинку кнопкой +</div></div>
-          <input id="montageOverlayUpload" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onchange="handleOverlayUpload(this.files)">
-        </div>
-        <div class="drawing-fragment-picker" id="drawingFragmentPicker">
-          <div class="drawing-fragment-head">
-            <strong>Фрагменты для схем</strong>
-            <span class="toggle-desc" id="drawingFragmentCount">Выберите до 12</span>
-          </div>
-          <div class="drawing-fragment-list" id="drawingFragmentList"><span class="toggle-desc">Выберите проект с транскрипцией</span></div>
-        </div>
-        <div class="drawing-replica-editor" id="drawingReplicaEditor" style="display:none">
-          <div class="drawing-replica-head">
-            <strong>Задания для схем</strong>
-            <button class="btn btn-small" type="button" onclick="addDrawingReplica()">+ Добавить реплику</button>
-          </div>
-          <div class="drawing-replica-list" id="drawingReplicaList"></div>
-        </div>
-        <div class="drawing-actions">
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <select id="drawingGenMode" onchange="applyDrawingGenMode()" style="background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:12px">
-              <option value="auto">Авто — 2–3 смысловых схемы по всей транскрипции</option>
-              <option value="manual">Ручной — по выбранным фрагментам</option>
+      </div>
+    </section>
+
+    <!-- ===== 3. Настройки субтитров ===== -->
+    <section class="montage-section" aria-labelledby="secSubs">
+      <h2 class="section-eyebrow" id="secSubs"><span class="section-num">3</span> Настройки субтитров</h2>
+      <div class="card">
+        <div class="montage-grid">
+          <div class="setting-group">
+            <label>Субтитры</label>
+            <select id="montageSubtitleMode" onchange="updatePreviewSubtitleMode()">
+              <option value="sentences">По предложениям</option>
+              <option value="words" selected>По словам</option>
+              <option value="phrases">По фразам (2-5 слов)</option>
             </select>
-            <button class="btn btn-primary" type="button" id="generateDrawingsBtn" onclick="generateMontageDrawings()">Создать схемы</button>
           </div>
-          <span class="toggle-desc" id="drawingGenerationStatus">Выберите режим и запустите генерацию: авто-подбор по транскрипции или ручной выбор фрагментов</span>
-        </div>
-        <div class="drawing-generation-progress" id="drawingGenerationProgress">
-          <div class="drawing-generation-progress-track"><div class="drawing-generation-progress-bar" id="drawingGenerationProgressBar"></div></div>
-          <div class="drawing-generation-progress-meta"><span id="drawingGenerationProgressLabel">Подготовка</span><span id="drawingGenerationProgressPercent">0%</span></div>
-          <div class="drawing-generation-progress-detail" id="drawingGenerationProgressDetail"></div>
-        </div>
-        <div class="drawing-proposals" id="drawingProposals"></div>
-        <div class="overlay-inspector" id="overlayInspector">
-          <div class="overlay-inspector-head"><strong id="overlayInspectorName">Наложение</strong></div>
-          <div class="overlay-inspector-grid">
-            <div class="setting-group"><label>Начало, сек</label><input type="number" id="overlayStart" min="0" step="0.05" oninput="updateSelectedOverlayFromInputs()"></div>
-            <div class="setting-group"><label>Конец, сек</label><input type="number" id="overlayEnd" min="0.05" step="0.05" oninput="updateSelectedOverlayFromInputs()"></div>
-            <div class="setting-group"><label>Размер, px</label><input type="number" id="overlaySize" min="20" max="1200" step="10" oninput="updateSelectedOverlayFromInputs()"></div>
-            <div class="setting-group" id="overlayDrawSpeedGroup" style="display:none"><label>Скорость рисования</label><input type="number" id="overlayDrawSpeed" min="10" max="50000" step="10" oninput="updateSelectedOverlayFromInputs()"></div>
+          <div class="setting-group">
+            <label>Позиция субтитров</label>
+            <select id="montageSubtitlePosition">
+              <option value="custom" selected>Своя (перетаскиванием)</option>
+              <option value="bottom">Внизу</option>
+              <option value="center">По центру</option>
+              <option value="top">Вверху</option>
+            </select>
+            <input type="hidden" id="montageSubtitleX" value="0.12">
+            <input type="hidden" id="montageSubtitleY" value="0.78">
+            <input type="hidden" id="montageSubtitleScale" value="1.00">
           </div>
+          <div class="setting-group">
+            <label>Шрифт субтитров</label>
+            <select id="montageSubtitleFont" onchange="updateSubtitlePreviewStyle()">
+              <option value="/Users/labiozzza/Documents/Default Project/transcriber/montage/fonts/Comfortaa.ttf">Comfortaa (встроен)</option>
+              <option value="/System/Library/Fonts/Helvetica.ttc">Системный (Helvetica)</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label>Размер шрифта, px</label>
+            <input type="number" id="montageSubtitleFontSize" value="64" min="24" max="128" step="1" oninput="updateSubtitleFontSize(false)" onchange="updateSubtitleFontSize(true)">
+          </div>
+        </div>
+        <div style="margin-top:12px">
+          <div class="toggle-row">
+            <div>
+              <div class="toggle-label">Фон-плашка за буквами</div>
+              <div class="toggle-desc">Выключите, чтобы оставить только буквы и обводку</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="montageSubtitleBox" onchange="updateSubtitlePreviewStyle()">
+              <div class="toggle-slider"></div>
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 4. Зум и отслеживание лица ===== -->
+    <section class="montage-section" aria-labelledby="secZoom">
+      <h2 class="section-eyebrow" id="secZoom"><span class="section-num">4</span> Зум и отслеживание лица</h2>
+      <div class="card">
+        <div class="montage-grid">
+          <div class="setting-group">
+            <label>Режим краёв при зуме</label>
+            <select id="montageEdgeMode">
+              <option value="reflect">Отражение</option>
+              <option value="scale" selected>Масштаб</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top:16px">
+          <div class="toggle-row">
+            <div>
+              <div class="toggle-label">Отслеживание лица</div>
+              <div class="toggle-desc">MediaPipe — анализ положения лица по кадрам</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="montageFaceTrack" onchange="updateAutozoomDependencyNote()">
+              <div class="toggle-slider"></div>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <div>
+              <div class="toggle-label">Автозум</div>
+              <div class="toggle-desc">Умный зум по смыслу текста</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="montageAutozoom" onchange="updateAutozoomDependencyNote()">
+              <div class="toggle-slider"></div>
+            </label>
+          </div>
+          <div class="dependency-note" id="autozoomDependencyNote"></div>
+        </div>
+        <div style="margin-top:12px">
+          <div class="toggle-row">
+            <div>
+              <div class="toggle-label">Переопределить таймлайн автозума</div>
+              <div class="toggle-desc">JSON-список [{&quot;time&quot;: 0, &quot;percent&quot;: 0}, ...]; заменит умный таймлайн</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="montageZoomOverride" onclick="document.getElementById('montageZoomTimeline').style.display=this.checked?'block':'none'">
+              <div class="toggle-slider"></div>
+            </label>
+          </div>
+          <textarea id="montageZoomTimeline" rows="4" placeholder='[{"time": 0, "percent": 0}, {"time": 2, "percent": 45}, {"time": 5, "percent": 10}]' style="display:none;width:100%;margin-top:10px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-family:ui-monospace,monospace;resize:vertical"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 5. Схемы, наложения и анимации ===== -->
+    <section class="montage-section" aria-labelledby="secDrawings">
+      <h2 class="section-eyebrow" id="secDrawings"><span class="section-num">5</span> Схемы, наложения и анимации</h2>
+
+      <div class="results-container" id="drawingsCard">
+        <div class="card">
+          <div class="card-title">Наложения на видео</div>
+          <div class="overlay-timeline-wrap">
+            <div class="overlay-timeline" id="overlayTimeline"><div class="overlay-timeline-empty">Добавьте картинку кнопкой +</div></div>
+            <input id="montageOverlayUpload" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onchange="handleOverlayUpload(this.files)">
+          </div>
+          <div class="overlay-inspector" id="overlayInspector">
+            <div class="overlay-inspector-head"><strong id="overlayInspectorName">Наложение</strong></div>
+            <div class="overlay-inspector-grid">
+              <div class="setting-group"><label>Начало, сек</label><input type="number" id="overlayStart" min="0" step="0.05" oninput="updateSelectedOverlayFromInputs()"></div>
+              <div class="setting-group"><label>Конец, сек</label><input type="number" id="overlayEnd" min="0.05" step="0.05" oninput="updateSelectedOverlayFromInputs()"></div>
+              <div class="setting-group"><label>Размер, px</label><input type="number" id="overlaySize" min="20" max="1200" step="10" oninput="updateSelectedOverlayFromInputs()"></div>
+              <div class="setting-group" id="overlayDrawSpeedGroup" style="display:none"><label>Скорость рисования</label><input type="number" id="overlayDrawSpeed" min="10" max="50000" step="10" oninput="updateSelectedOverlayFromInputs()"></div>
+            </div>
+            <div class="overlay-position" id="overlayPosition">X 0.50 · Y 0.50 · слой 1</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Схемы из транскрипции</div>
+          <div class="drawing-fragment-picker" id="drawingFragmentPicker">
+            <div class="drawing-fragment-head">
+              <strong>Фрагменты для схем</strong>
+              <span class="toggle-desc" id="drawingFragmentCount">Выберите до 12</span>
+            </div>
+            <div class="drawing-fragment-list" id="drawingFragmentList"><span class="toggle-desc">Выберите проект с транскрипцией</span></div>
+          </div>
+          <div class="drawing-replica-editor" id="drawingReplicaEditor" style="display:none">
+            <div class="drawing-replica-head">
+              <strong>Задания для схем</strong>
+              <button class="btn btn-small" type="button" onclick="addDrawingReplica()">+ Добавить реплику</button>
+            </div>
+            <div class="drawing-replica-list" id="drawingReplicaList"></div>
+          </div>
+          <div class="drawing-actions">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <select id="drawingGenMode" onchange="applyDrawingGenMode()" style="background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:12px">
+                <option value="auto">Авто — 2–3 смысловых схемы по всей транскрипции</option>
+                <option value="manual">Ручной — по выбранным фрагментам</option>
+              </select>
+              <button class="btn btn-primary" type="button" id="generateDrawingsBtn" onclick="generateMontageDrawings()">Создать схемы</button>
+            </div>
+            <span class="toggle-desc" id="drawingGenerationStatus">Выберите режим и запустите генерацию: авто-подбор по транскрипции или ручной выбор фрагментов</span>
+          </div>
+          <div class="drawing-generation-progress" id="drawingGenerationProgress">
+            <div class="drawing-generation-progress-track"><div class="drawing-generation-progress-bar" id="drawingGenerationProgressBar"></div></div>
+            <div class="drawing-generation-progress-meta"><span id="drawingGenerationProgressLabel">Подготовка</span><span id="drawingGenerationProgressPercent">0%</span></div>
+            <div class="drawing-generation-progress-detail" id="drawingGenerationProgressDetail"></div>
+          </div>
+          <div class="drawing-proposals" id="drawingProposals"></div>
           <div class="drawing-revise-panel" id="drawingRevisePanel">
             <label for="drawingReviseText">Как изменить схему</label>
             <textarea id="drawingReviseText" rows="2" placeholder="Например: сделай линию роста круче и добавь стрелку между блоками"></textarea>
@@ -1131,102 +1341,32 @@ select option { background: var(--surface2); }
               <div class="drawing-generation-progress-meta"><span id="drawingReviseProgressLabel">Подготовка</span><span id="drawingReviseProgressPercent">0%</span></div>
             </div>
           </div>
-          <div class="overlay-position" id="overlayPosition">X 0.50 · Y 0.50 · слой 1</div>
         </div>
-        <div class="keybar" id="projectPreviewKeybar">
-          <div id="projectPreviewMarkers"></div>
-          <div id="projectPreviewPlayhead" class="keybar-playhead"></div>
-        </div>
-      </div>
-    </div>
 
-    <!-- Input -->
-    <div class="card">
-      <div class="card-title">Исходное видео и текст</div>
-      <div class="upload-zone" id="montageUploadZone">
-        <input type="file" id="montageFileInput" accept="video/*,.mp4,.mov,.mkv,.webm">
-        <div class="upload-icon">🎬</div>
-        <div class="upload-text">Видео (9:16) — перетащите или нажмите</div>
-        <div class="upload-filename" id="montageFileName"></div>
-      </div>
-      <div id="montageProjectSel" style="margin-top:10px;font-size:13px;color:var(--accent2);display:none">
-        Выбран проект: <b id="montageProjectName"></b>
-        <a href="javascript:void(0)" onclick="clearProject()" style="margin-left:8px;color:var(--text2)">✕ отменить</a>
-      </div>
-      <div style="margin-top:12px">
-        <label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">
-          Текст: готовый SRT <em style="text-transform:none">(необязательно)</em>
-        </label>
-        <input type="file" id="montageSrtInput" accept=".srt,.txt" style="color:var(--text2)">
-      </div>
-      <div class="toggle-row" style="margin-top:12px">
-        <div>
-          <div class="toggle-label">Использовать транскрибацию</div>
-          <div class="toggle-desc" id="montageTranscriptInfo">Сначала транскрибируйте аудио на вкладке «Транскрибация»</div>
+        <div class="card">
+          <div class="card-title">Анимация таймлайна</div>
+          <div class="montage-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+            <div class="setting-group">
+              <label>Анимация таймлайна</label>
+              <select id="montageAnimationId" onchange="updateAnimationPreview()"><option value="">Без анимации</option></select>
+            </div>
+            <div class="setting-group">
+              <label>Появляется через, сек</label>
+              <input type="number" id="montageAnimationStart" value="0" min="0" step="0.1" oninput="syncAnimationPreview()">
+            </div>
+            <div class="setting-group">
+              <label>Смещение по X, px</label>
+              <input type="number" id="montageAnimationOffset" value="0" min="-200" max="200" step="1" oninput="syncAnimationPreview()">
+            </div>
+          </div>
         </div>
-        <label class="toggle">
-          <input type="checkbox" id="montageUseTranscript" checked>
-          <div class="toggle-slider"></div>
-        </label>
       </div>
-    </div>
+    </section>
 
-    <!-- Settings -->
-    <div class="card">
-      <div class="card-title">Настройки монтажа</div>
-      <div class="montage-grid">
-        <div class="setting-group">
-          <label>Субтитры</label>
-          <select id="montageSubtitleMode" onchange="updatePreviewSubtitleMode()">
-            <option value="sentences">По предложениям</option>
-            <option value="words" selected>По словам</option>
-            <option value="phrases">По фразам (2-5 слов)</option>
-          </select>
-        </div>
-        <div class="setting-group">
-          <label>Режим краёв при зуме</label>
-          <select id="montageEdgeMode">
-            <option value="reflect">Отражение</option>
-            <option value="scale" selected>Масштаб</option>
-          </select>
-        </div>
-        <div class="setting-group">
-          <label>&nbsp;</label>
-          <button class="btn btn-primary" id="montageStartBtn" disabled onclick="startMontage()">Запустить монтаж</button>
-        </div>
-      </div>
-
-      <div style="margin-top:16px">
-        <div class="toggle-row">
-          <div>
-            <div class="toggle-label">Отслеживание лица</div>
-            <div class="toggle-desc">MediaPipe — анализ глаз для автозума</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="montageFaceTrack">
-            <div class="toggle-slider"></div>
-          </label>
-        </div>
-        <div class="toggle-row">
-          <div>
-            <div class="toggle-label">Фон-плашка за буквами</div>
-            <div class="toggle-desc">Выключите, чтобы оставить только буквы и обводку</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="montageSubtitleBox" onchange="updateSubtitlePreviewStyle()">
-            <div class="toggle-slider"></div>
-          </label>
-        </div>
-        <div class="toggle-row">
-          <div>
-            <div class="toggle-label">Автозум</div>
-            <div class="toggle-desc">Умный зум по смыслу текста</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="montageAutozoom">
-            <div class="toggle-slider"></div>
-          </label>
-        </div>
+    <!-- ===== 6. Дополнительные настройки ===== -->
+    <section class="montage-section" aria-labelledby="secExtra">
+      <h2 class="section-eyebrow" id="secExtra"><span class="section-num">6</span> Дополнительные настройки</h2>
+      <div class="card">
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Добавить отражение</div>
@@ -1269,111 +1409,76 @@ select option { background: var(--surface2); }
           </label>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- Advanced -->
-    <div class="card">
-      <div class="card-title">Дополнительно: таймлайн и наложения</div>
-      <div class="montage-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
-        <div class="setting-group">
-          <label>Позиция субтитров</label>
-          <select id="montageSubtitlePosition">
-            <option value="custom" selected>Своя (перетаскиванием)</option>
-            <option value="bottom">Внизу</option>
-            <option value="center">По центру</option>
-            <option value="top">Вверху</option>
-          </select>
-          <input type="hidden" id="montageSubtitleX" value="0.12">
-          <input type="hidden" id="montageSubtitleY" value="0.78">
-          <input type="hidden" id="montageSubtitleScale" value="1.00">
-        </div>
-        <div class="setting-group">
-          <label>Шрифт субтитров</label>
-          <select id="montageSubtitleFont" onchange="updateSubtitlePreviewStyle()">
-            <option value="/Users/labiozzza/Documents/Default Project/transcriber/montage/fonts/Comfortaa.ttf">Comfortaa (встроен)</option>
-            <option value="/System/Library/Fonts/Helvetica.ttc">Системный (Helvetica)</option>
-          </select>
-        </div>
-        <div class="setting-group">
-          <label>Размер шрифта, px</label>
-          <input type="number" id="montageSubtitleFontSize" value="64" min="24" max="128" step="1" oninput="updateSubtitleFontSize(false)" onchange="updateSubtitleFontSize(true)">
-        </div>
-        <div class="setting-group">
-          <label>Анимация таймлайна</label>
-          <select id="montageAnimationId" onchange="updateAnimationPreview()"><option value="">Без анимации</option></select>
-        </div>
-        <div class="setting-group">
-          <label>Появляется через, сек</label>
-          <input type="number" id="montageAnimationStart" value="0" min="0" step="0.1" oninput="syncAnimationPreview()">
-        </div>
-        <div class="setting-group">
-          <label>Смещение по X, px</label>
-          <input type="number" id="montageAnimationOffset" value="0" min="-200" max="200" step="1" oninput="syncAnimationPreview()">
-        </div>
-      </div>
-      <div style="margin-top:12px">
-        <div class="toggle-row">
-          <div>
-            <div class="toggle-label">Переопределить таймлайн автозума</div>
-            <div class="toggle-desc">JSON-список [{&quot;time&quot;: 0, &quot;percent&quot;: 0}, ...]; заменит умный таймлайн</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="montageZoomOverride" onclick="document.getElementById('montageZoomTimeline').style.display=this.checked?'block':'none'">
-            <div class="toggle-slider"></div>
-          </label>
-        </div>
-        <textarea id="montageZoomTimeline" rows="4" placeholder='[{"time": 0, "percent": 0}, {"time": 2, "percent": 45}, {"time": 5, "percent": 10}]' style="display:none;width:100%;margin-top:10px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-family:ui-monospace,monospace;resize:vertical"></textarea>
-      </div>
-    </div>
-
-    <!-- Montage progress: unified collapsible operations component -->
-    <div class="card progress-container active" id="montageProgressCard">
-      <div class="ops-header" onclick="toggleOperationsBody()">
-        <strong>Операции</strong>
-        <span class="ops-summary" id="operationSummary">Ожидание...</span>
-        <span class="ops-chevron" id="operationChevron">▾</span>
-      </div>
-      <div class="ops-body" id="operationsBody"></div>
-      <div class="progress-detail" id="montageLog" style="max-height:140px;overflow:auto;white-space:pre-wrap;font-size:12px"></div>
-    </div>
-
-    <!-- Montage error -->
-    <div class="error-box" id="montageErrorBox"></div>
-
-    <!-- Montage result + publish -->
-    <div class="results-container" id="montageResultsCard">
+    <!-- ===== 7. Обработка и прогресс ===== -->
+    <section class="montage-section" aria-labelledby="secProcess">
+      <h2 class="section-eyebrow" id="secProcess"><span class="section-num">7</span> Обработка и прогресс</h2>
       <div class="card">
-        <div class="card-title">Готовый ролик</div>
-        <div class="montage-status-row">
-          <span id="montageResultInfo"></span>
-        </div>
-<div class="video-stage" id="montageVideoStage" style="display:none">
-          <video id="montageVideo" playsinline controls preload="metadata"></video>
-          <div class="sub-drag-layer">
-            <div class="sub-drag-tip">Субтитры запечены в ролик. Чтобы изменить позицию/размер — вернитесь на превью проекта.</div>
-          </div>
-        </div>
-        </div>
-        <div class="timebar-scale" id="montageVideoTimebar" style="display:none">
-          <span id="montageVideoCur">00:00.000</span>
-          <span id="montageVideoDur">00:00.000</span>
-        </div>
-        <div class="keybar" id="montageVideoKeybar" style="display:none">
-          <div id="montageVideoMarkers"></div>
-          <div id="montageVideoPlayhead" class="keybar-playhead"></div>
-        </div>
-        <div class="export-bar">
-          <button class="export-btn" id="shareMontageBtn" onclick="shareMontage()">Поделиться / сохранить в галерею</button>
-        </div>
-
-        <div class="card-title" style="margin-top:20px">Таймлайн ролика</div>
-        <div id="montageTimelineInfo" style="font-size:13px;color:var(--text2)"></div>
-
-        <div class="card-title" style="margin-top:20px">Публикация</div>
-        <button class="btn btn-primary" id="openPublishWindowBtn" disabled onclick="openPublishWindow()">Открыть окно публикации</button>
-        <div class="publish-results" id="montagePublishResults"></div>
+        <button class="btn btn-primary" id="montageStartBtn" disabled onclick="startMontage()">Запустить монтаж</button>
       </div>
-    </div>
+
+      <!-- Montage progress: unified collapsible operations component -->
+      <div class="card progress-container active" id="montageProgressCard">
+        <div class="ops-main">
+          <div class="ops-main-head">
+            <strong class="ops-main-title" id="operationTitle">Операции</strong>
+            <span class="ops-main-percent" id="operationPercent">0%</span>
+          </div>
+          <div class="progress-bar-wrapper ops-main-bar" id="operationMainBarWrap">
+            <div class="progress-bar" id="operationMainBar"></div>
+          </div>
+          <div class="ops-main-detail progress-detail" id="operationDetail">Ожидание...</div>
+          <button type="button" class="ops-toggle" id="operationToggle" aria-expanded="true"
+                  aria-controls="operationsBody" onclick="toggleOperationsBody()">
+            <span id="operationToggleLabel">Скрыть подробности</span>
+          </button>
+        </div>
+        <div class="ops-body" id="operationsBody"></div>
+        <div class="progress-detail" id="montageLog" style="max-height:140px;overflow:auto;white-space:pre-wrap;font-size:12px"></div>
+      </div>
+
+      <!-- Montage error -->
+      <div class="error-box" id="montageErrorBox"></div>
+    </section>
+
+    <!-- ===== 8. Готовый ролик и публикация ===== -->
+    <section class="montage-section" aria-labelledby="secResult">
+      <h2 class="section-eyebrow" id="secResult"><span class="section-num">8</span> Готовый ролик и публикация</h2>
+
+      <div class="results-container" id="montageResultsCard">
+        <div class="card">
+          <div class="card-title">Готовый ролик</div>
+          <div class="montage-status-row">
+            <span id="montageResultInfo"></span>
+          </div>
+          <div class="video-stage" id="montageVideoStage" style="display:none">
+            <video id="montageVideo" playsinline controls preload="metadata"></video>
+            <div class="sub-drag-layer">
+              <div class="sub-drag-tip">Субтитры запечены в ролик. Чтобы изменить позицию/размер — вернитесь на превью проекта.</div>
+            </div>
+          </div>
+          <div class="timebar-scale" id="montageVideoTimebar" style="display:none">
+            <span id="montageVideoCur">00:00.000</span>
+            <span id="montageVideoDur">00:00.000</span>
+          </div>
+          <div class="keybar" id="montageVideoKeybar" style="display:none">
+            <div id="montageVideoMarkers"></div>
+            <div id="montageVideoPlayhead" class="keybar-playhead"></div>
+          </div>
+          <div class="export-bar">
+            <button class="export-btn" id="shareMontageBtn" onclick="shareMontage()">Поделиться / сохранить в галерею</button>
+          </div>
+
+          <div class="card-title" style="margin-top:20px">Таймлайн ролика</div>
+          <div id="montageTimelineInfo" style="font-size:13px;color:var(--text2)"></div>
+
+          <div class="card-title" style="margin-top:20px">Публикация</div>
+          <button class="btn btn-primary" id="openPublishWindowBtn" disabled onclick="openPublishWindow()">Открыть окно публикации</button>
+          <div class="publish-results" id="montagePublishResults"></div>
+        </div>
+      </div>
+    </section>
 
     <div class="publish-modal" id="montagePublishModal" onclick="if(event.target===this) closePublishWindow()">
       <div class="publish-dialog" role="dialog" aria-modal="true" aria-labelledby="publishDialogTitle">
@@ -1757,6 +1862,7 @@ function showError(msg) {
 
 // ========== АВТОМОНТАЖ ==========
 let montageJobId = localStorage.getItem('montageJobId');
+let montageActive = false;
 let transcriptJobId = null;
 let montageWs = null;
 let projects = [];
@@ -1766,6 +1872,7 @@ let montageInputDirty = false;
 function clearMontageOutput(clearJob = false) {
   if (clearJob) {
     montageJobId = null;
+    montageActive = false;
     localStorage.removeItem('montageJobId');
   }
   if (montagePollTimer) {
@@ -1798,6 +1905,9 @@ function clearMontageOutput(clearJob = false) {
   window.__selectedCoverId = '';
   window.__publishFieldsRestored = false;
   window.__forceNewPublication = false;
+  window.__opsState = {};
+  window.__opsBodySig = null;
+  renderOperations({});
   const coverGrid = document.getElementById('montageCoverGrid');
   coverGrid.innerHTML = '';
   delete coverGrid.dataset.coverKey;
@@ -1808,9 +1918,11 @@ function activateMontageJob(jobId) {
   if (!jobId || jobId === montageJobId) return;
   clearMontageOutput(true);
   montageJobId = jobId;
+  montageActive = true;
   montageInputDirty = false;
   localStorage.setItem('montageJobId', montageJobId);
   startMontagePolling();
+  connectMontageWs();
 }
 
 function beginNewMontageInput() {
@@ -2173,6 +2285,8 @@ function clearProject(skipRefresh = false) {
   document.getElementById('montageProjectSel').style.display = 'none';
   document.getElementById('montageStartBtn').disabled = !montageVideoFile;
   document.getElementById('projectPreviewCard').classList.remove('active');
+  const drawingsCard = document.getElementById('drawingsCard');
+  if (drawingsCard) drawingsCard.classList.remove('active');
   if (!skipRefresh) refreshProjects();
 }
 
@@ -2186,11 +2300,14 @@ async function deleteProject(id) {
 
 async function showProjectPreview(p) {
   const card = document.getElementById('projectPreviewCard');
+  const drawings = document.getElementById('drawingsCard');
   if (!p || !p.video_ok || !p.transcript_job_id) {
     card.classList.remove('active');
+    if (drawings) drawings.classList.remove('active');
     return;
   }
   card.classList.add('active');
+  if (drawings) drawings.classList.add('active');
   const v = document.getElementById('projectPreviewVideo');
   const tj = p.transcript_job_id;
   if (v.dataset.tj !== tj) {
@@ -2430,11 +2547,13 @@ function updateDrawingFragmentCount() {
 
 function pushDrawingsOpsState(jobOrState) {
   const state = jobOrState || {};
-  const pct = state.progress === null || state.progress === undefined
-    ? (state.status === 'done' || state.status === 'error' ? 0 : null)
-    : Number(state.progress) || 0;
-  window.__opsState = Object.assign({}, window.__opsState || {}, {drawings: {
-    status: state.status || 'idle', progress: pct, detail: state.detail || '',
+  const status = state.status || 'idle';
+  let pct;
+  if (status === 'done') pct = 100;
+  else if (state.progress === null || state.progress === undefined) pct = status === 'error' ? 0 : null;
+  else pct = Number(state.progress) || 0;
+  mergeOpsState({ drawings: {
+    status: status, progress: pct, detail: state.detail || '', error: state.error || '',
   }});
   renderOperations(window.__opsState);
 }
@@ -3440,6 +3559,27 @@ function updateMirrorPreview() {
   if (video && toggle) video.classList.toggle('source-mirrored', toggle.checked);
 }
 
+function updateAutozoomDependencyNote() {
+  const note = document.getElementById('autozoomDependencyNote');
+  if (!note) return;
+  const face = document.getElementById('montageFaceTrack');
+  const zoom = document.getElementById('montageAutozoom');
+  const faceOn = !!(face && face.checked);
+  const zoomOn = !!(zoom && zoom.checked);
+  let text;
+  if (zoomOn && faceOn) {
+    text = 'Отслеживание лица включено: автозум держит кадр на лице и работает точнее.';
+  } else if (zoomOn && !faceOn) {
+    text = 'Автозум включён без отслеживания лица — зум идёт по общему кадру и может быть менее точным. Включите «Отслеживание лица» выше для следования за лицом.';
+  } else if (!zoomOn && faceOn) {
+    text = 'Отслеживание лица включено, но автозум выключен — результат отслеживания не будет использован.';
+  } else {
+    text = 'Отслеживание лица даёт данные для автозума. Без него автозум работает по общему кадру.';
+  }
+  note.textContent = text;
+  note.classList.toggle('active', zoomOn && faceOn);
+}
+
 let animationBuilderFrames = [];
 const animationBuilderInput = document.getElementById('animationBuilderInput');
 animationBuilderInput.addEventListener('change', () => {
@@ -3694,6 +3834,7 @@ async function startMontage() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
     montageJobId = data.job_id;
+    montageActive = true;
     montageInputDirty = false;
     localStorage.setItem('montageJobId', montageJobId);
     connectMontageWs();
@@ -3710,15 +3851,13 @@ function connectMontageWs() {
   montageWs.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'progress') {
-      window.__opsState = Object.assign({}, window.__opsState || {}, {
+      mergeOpsState({
         progress: msg.progress, stage: msg.stage, detail: msg.detail,
         status: (msg.stage === 'error' ? 'error' : (msg.stage === 'done' || msg.stage === 'published' ? 'done' : 'processing')),
       });
-      montageUpdateProgress(msg.progress, msg.stage, msg.detail);
       renderOperations(window.__opsState);
     } else if (msg.type === 'operation') {
-      window.__opsState = Object.assign({}, window.__opsState || {}, { operation: msg.operation });
-      montageUpdateProgress(msg.operation.progress, msg.operation.active_stage || msg.operation.status, msg.operation.detail || '', false);
+      mergeOpsState({ operation: msg.operation });
       renderOperations(window.__opsState);
     } else if (msg.type === 'log') {
       const logBox = document.getElementById('montageLog');
@@ -3728,6 +3867,9 @@ function connectMontageWs() {
   };
   montageWs.onclose = () => {
     if (montageJobId) refreshMontageResult();
+    if (montageActive && !document.hidden && document.getElementById('viewMontage').classList.contains('active')) {
+      setTimeout(() => { if (montageActive) connectMontageWs(); }, 1500);
+    }
   };
 }
 
@@ -3739,42 +3881,76 @@ function startMontagePolling() {
   refreshMontageResult();
 }
 
+window.__opsState = window.__opsState || {};
+
+function mergeOpsState(patch) {
+  if (!patch || typeof patch !== 'object') return;
+  let incoming = patch;
+  // Never let a stale operation snapshot overwrite a newer one (spec 4.2).
+  if (incoming.operation && window.__opsState.operation) {
+    const next = Number(incoming.operation.version) || 0;
+    const current = Number(window.__opsState.operation.version) || 0;
+    if (next && current && next < current) {
+      incoming = Object.assign({}, incoming);
+      delete incoming.operation;
+    }
+  }
+  window.__opsState = Object.assign({}, window.__opsState, incoming);
+}
+
 let operationsBodyOpen = true;
 function toggleOperationsBody() {
   operationsBodyOpen = !operationsBodyOpen;
   const body = document.getElementById('operationsBody');
   if (body) body.classList.toggle('closed', !operationsBodyOpen);
-  document.getElementById('operationChevron').textContent = operationsBodyOpen ? '▾' : '▸';
+  const toggle = document.getElementById('operationToggle');
+  if (toggle) {
+    toggle.setAttribute('aria-expanded', operationsBodyOpen ? 'true' : 'false');
+    const label = document.getElementById('operationToggleLabel');
+    if (label) label.textContent = operationsBodyOpen ? 'Скрыть подробности' : 'Показать подробности';
+    toggle.focus();
+  }
 }
 
 function opStatusLabel(status) {
   const map = { pending: 'в очереди', running: 'выполняется', completed: 'готово', failed: 'ошибка',
     skipped: 'пропущено', cancelled: 'отменено', done: 'готово', error: 'ошибка', generating: 'выполняется',
     publishing: 'выполняется', processing: 'выполняется', queued: 'в очереди', preparing: 'подготовка',
-    idle: 'не запускалось', uploaded: 'загружено' };
+    partial: 'частично завершено', idle: 'не запускалось', uploaded: 'загружено' };
   return map[status] || status;
 }
 
 function opsStageRow(stage) {
-  const dot = { pending: '', running: 'running', completed: 'done', failed: 'fail', skipped: 'skip' }[stage.status] || '';
+  let dot = { pending: '', running: 'running', completed: 'done', failed: 'fail', skipped: 'skip' }[stage.status] || '';
+  if (stage.warning) dot = 'warn';
   const pct = stage.progress == null ? null : Number(stage.progress);
   let bar = '<span class="dot ' + dot + '"></span>';
   bar += '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(stage.label || stage.key) + '</span>';
   bar += '<span class="ops-stage-bar">' + (pct == null && stage.status === 'running' ? '<i class="ind"></i>'
     : '<i style="width:' + (stage.status === 'completed' ? 100 : (pct == null ? 0 : pct)) + '%"></i>') + '</span>';
-  const detail = stage.detail || stage.error || '';
-  if (detail) bar += '<span style="max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text3)">' + esc(detail) + '</span>';
+  const detail = stage.error || stage.warning || stage.detail || '';
+  if (detail) bar += '<span class="' + (stage.error ? 'ops-op-error' : (stage.warning ? 'ops-op-warn' : '')) + '" style="max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text3)">' + esc(detail) + '</span>';
   return '<div class="ops-stage">' + bar + '</div>';
 }
 
 function opsOpBlock(op) {
+  let cls = '';
+  if (op.warning) cls = ' ops-op-warn';
+  else if (op.status === 'error' || op.status === 'failed') cls = ' ops-op-error';
   let html = '<div class="ops-op">';
   html += '<div class="ops-op-head"><span>' + esc(op.label) + '</span>';
-  html += '<span style="margin-left:auto;font-size:12px;color:var(--text2)">' + opStatusLabel(op.status || '') + '</span>';
+  const statusText = opStatusLabel(op.status || '');
+  html += '<span class="' + cls + '" style="margin-left:auto;font-size:12px;color:var(--text2)">' + esc(statusText) + '</span>';
   html += '<span style="font-size:12px;color:var(--accent2);min-width:40px;text-align:right">' + (op.progress == null ? '…' : Math.round(op.progress) + '%') + '</span></div>';
-  const width = op.progress == null ? 100 : Math.round(Math.max(0, Math.min(100, op.progress)));
-  html += '<div class="ops-op-bar-wrap"><div class="ops-op-bar" style="width:' + width + '%"></div></div>';
+  if (op.progress == null) {
+    html += '<div class="ops-op-bar-wrap"><div class="ops-op-bar ind"></div></div>';
+  } else {
+    const width = Math.round(Math.max(0, Math.min(100, op.progress)));
+    html += '<div class="ops-op-bar-wrap"><div class="ops-op-bar" style="width:' + width + '%"></div></div>';
+  }
   if (op.detail) html += '<div style="font-size:12px;color:var(--text2);margin-top:6px">' + esc(op.detail) + '</div>';
+  if (op.error) html += '<div class="ops-op-error" style="font-size:12px;margin-top:6px">' + esc(op.error) + '</div>';
+  if (op.warning) html += '<div class="ops-op-warn" style="font-size:12px;margin-top:6px">' + esc(op.warning) + '</div>';
   if (op.stages) html += '<div style="margin-top:8px">' + op.stages.map(opsStageRow).join('') + '</div>';
   if (op.targets && op.targets.length) {
     html += '<div style="margin-top:6px">' + op.targets.map(function(t) {
@@ -3787,31 +3963,76 @@ function opsOpBlock(op) {
   return html + '</div>';
 }
 
+function targetProgressPercent(target) {
+  if (target.status === 'done' || target.status === 'error') return 100;
+  if (target.progress != null) return Number(target.progress) || 0;
+  if (target.status === 'queued' || target.status === 'preparing' || target.status === 'publishing') return null;
+  return 0;
+}
+
 function buildOpsState(state) {
   const ops = [];
   const opSnap = state.operation;
   if (opSnap) {
-    ops.push({ label: 'Монтаж', status: state.status || opSnap.status || 'running',
-      progress: opSnap.progress, detail: opSnap.detail || '', stages: opSnap.stages || [] });
-  } else {
-    ops.push({ label: 'Монтаж', status: state.status || 'processing', progress: Number(state.progress) || 0,
-      detail: state.detail || state.stage || '', stages: null });
+    ops.push({ key: 'montage', label: 'Монтаж видео', status: opSnap.status || state.status || 'running',
+      progress: opSnap.progress, detail: opSnap.detail || '', error: opSnap.error || '',
+      warning: opSnap.warning || '', stages: opSnap.stages || [] });
+  } else if (state.status) {
+    ops.push({ key: 'montage', label: 'Монтаж видео', status: state.status,
+      progress: Number(state.progress) || 0, detail: state.detail || state.stage || '',
+      error: state.error || '', warning: '', stages: null });
   }
   const cs = state.cover_status;
-  if (cs && ['generating', 'done', 'error', 'idle'].includes(cs)) {
-    ops.push({ label: 'Обложки', status: cs, progress: Number(state.cover_progress) || 0, detail: state.cover_detail || '', stages: null });
+  if (cs && ['generating', 'done', 'error'].includes(cs)) {
+    const progress = cs === 'generating' ? (Number(state.cover_progress) || 0) : (cs === 'done' ? 100 : 0);
+    ops.push({ key: 'covers', label: 'Обложки', status: cs, progress: progress,
+      detail: state.cover_detail || '', error: state.cover_error || '', warning: '', stages: null });
   }
   if (state.drawings) {
-    ops.push({ label: 'Схемы', status: state.drawings.status, progress: state.drawings.progress === null ? null : Number(state.drawings.progress) || 0, detail: state.drawings.detail || '', stages: null });
+    const d = state.drawings;
+    ops.push({ key: 'drawings', label: 'Схемы', status: d.status,
+      progress: d.progress === null || d.progress === undefined ? null : Number(d.progress) || 0,
+      detail: d.detail || '', error: d.error || '', warning: '', stages: null });
   }
   if (state.publish_progress) {
     const targets = Object.values(state.publish_progress);
-    const doneTargets = targets.filter(function(t) { return t.status === 'done'; }).length;
-    const st = targets.every(function(t) { return t.status === 'done'; }) ? 'done' : 'publishing';
-    ops.push({ label: 'Публикация', status: st, progress: targets.length ? Math.round(doneTargets / targets.length * 100) : 0,
-      detail: 'Опубликовано ' + doneTargets + ' из ' + targets.length, stages: null, targets: targets });
+    const anyIndeterminate = targets.some(function(t) { return targetProgressPercent(t) === null; });
+    const known = targets.map(function(t) { const p = targetProgressPercent(t); return p === null ? 0 : p; });
+    const values = targets.map(function(t) { const p = targetProgressPercent(t); return p === null ? 0 : p; });
+    const average = values.length ? values.reduce(function(a, b) { return a + b; }, 0) / values.length : 0;
+    const doneCount = targets.filter(function(t) { return t.status === 'done'; }).length;
+    const errorCount = targets.filter(function(t) { return t.status === 'error'; }).length;
+    let status = 'publishing';
+    if (doneCount === targets.length) status = 'done';
+    else if (errorCount && doneCount + errorCount === targets.length) status = 'partial';
+    const detailBits = ['Опубликовано ' + doneCount + ' из ' + targets.length];
+    if (errorCount) detailBits.push('ошибок: ' + errorCount);
+    ops.push({ key: 'publish', label: 'Публикация', status: status,
+      progress: anyIndeterminate ? null : average, detail: detailBits.join(' · '),
+      error: '', warning: status === 'partial' ? 'Не все площадки опубликованы' : '', stages: null, targets: targets });
   }
   return ops;
+}
+
+const OPS_ACTIVE_STATUSES = ['publishing', 'preparing', 'processing', 'running', 'generating', 'queued', 'partial'];
+function pickMainOp(ops) {
+  if (!ops.length) return null;
+  const order = ['publish', 'montage', 'covers', 'drawings'];
+  for (const key of order) {
+    const op = ops.find(function(o) { return o.key === key; });
+    if (op && OPS_ACTIVE_STATUSES.includes(op.status)) return op;
+  }
+  return ops.find(function(o) { return o.key === 'publish'; })
+    || ops.find(function(o) { return o.key === 'montage'; })
+    || ops[0];
+}
+
+function opsBodySignature(ops) {
+  return ops.map(function(o) {
+    const stages = (o.stages || []).map(function(s) { return s.key + s.status + (s.progress == null ? 'x' : Math.round(s.progress)); }).join(',');
+    const targets = (o.targets || []).map(function(t) { return t.id + t.status + (t.progress == null ? 'x' : Math.round(t.progress)); }).join(',');
+    return o.key + o.status + Math.round(o.progress == null ? -1 : o.progress) + '|' + stages + '|' + targets + '|' + (o.warning ? 'w' : '');
+  }).join('||');
 }
 
 function renderOperations(state) {
@@ -3819,24 +4040,51 @@ function renderOperations(state) {
   if (!card) return;
   const ops = buildOpsState(state || {});
   const body = document.getElementById('operationsBody');
-  const summary = document.getElementById('operationSummary');
-  if (!body || !summary) return;
-  const montageOp = ops.find(function(o) { return o.label === 'Монтаж'; });
-  const headOp = montageOp || ops[0];
-  if (headOp) {
-    summary.textContent = (headOp.detail ? headOp.detail + ' · ' : '') + (headOp.progress == null ? 'работаем' : headOp.progress.toFixed(1) + '%');
+  const titleEl = document.getElementById('operationTitle');
+  if (!body || !titleEl) return;
+  const pctEl = document.getElementById('operationPercent');
+  const barWrap = document.getElementById('operationMainBarWrap');
+  const barEl = document.getElementById('operationMainBar');
+  const detailEl = document.getElementById('operationDetail');
+  const main = pickMainOp(ops);
+  if (main) {
+    let title = main.label;
+    if (main.key === 'montage' && (main.status === 'done' || main.status === 'completed') && !main.warning) title = 'Видео готово';
+    titleEl.textContent = title;
+    if (main.error) {
+      pctEl.textContent = 'ошибка';
+      barWrap.classList.remove('indeterminate');
+      barEl.style.width = '100%';
+      detailEl.textContent = main.error;
+    } else if (main.progress == null) {
+      pctEl.textContent = '…';
+      barWrap.classList.add('indeterminate');
+      detailEl.textContent = main.detail || opStatusLabel(main.status);
+    } else {
+      const pct = Math.max(0, Math.min(100, Number(main.progress)));
+      pctEl.textContent = pct.toFixed(1) + '%';
+      barWrap.classList.remove('indeterminate');
+      barEl.style.width = pct + '%';
+      detailEl.textContent = [main.detail, main.warning].filter(Boolean).join(' · ') || opStatusLabel(main.status);
+    }
   } else {
-    summary.textContent = 'Нет активных операций';
+    titleEl.textContent = 'Операции';
+    pctEl.textContent = '0%';
+    barWrap.classList.remove('indeterminate');
+    barEl.style.width = '0%';
+    detailEl.textContent = 'Ожидание...';
   }
   body.className = 'ops-body' + (operationsBodyOpen ? '' : ' closed');
-  if (!ops.length) {
-    body.innerHTML = '<div style="font-size:12px;color:var(--text2)">Нет активных операций</div>';
-  } else {
-    body.innerHTML = ops.map(opsOpBlock).join('');
+  const signature = opsBodySignature(ops);
+  if (window.__opsBodySig !== signature) {
+    window.__opsBodySig = signature;
+    body.innerHTML = ops.length ? ops.map(opsOpBlock).join('')
+      : '<div style="font-size:12px;color:var(--text2)">Нет активных операций</div>';
   }
-  document.getElementById('operationChevron').textContent = operationsBodyOpen ? '▾' : '▸';
+  const toggle = document.getElementById('operationToggle');
+  if (toggle) toggle.setAttribute('aria-expanded', operationsBodyOpen ? 'true' : 'false');
 }
-renderOperations({});
+renderOperations(window.__opsState);
 
 function montageUpdateProgress(progress, stage, detail, refreshAfterTerminal = true) {
   if (refreshAfterTerminal && (stage === 'done' || stage === 'published' || stage === 'error')) {
@@ -3852,9 +4100,9 @@ async function refreshMontageResult() {
     const res = await fetch(`/api/montage/result/${requestedJobId}`);
     const data = await res.json();
     if (requestedJobId !== montageJobId) return;
-    window.__opsState = data;
+    mergeOpsState(data);
     montageUpdateProgress(data.progress || 0, data.stage || data.status, data.detail || '', false);
-    renderOperations(data);
+    renderOperations(window.__opsState);
     if (data.selected_cover_id && !window.__selectedCoverId) {
       window.__selectedCoverId = data.selected_cover_id;
     }
@@ -3872,6 +4120,7 @@ async function refreshMontageResult() {
     if (data.status === 'error') {
       clearInterval(montagePollTimer);
       montagePollTimer = null;
+      montageActive = false;
       montageError(data.error || 'Ошибка монтажа');
       document.getElementById('montageStartBtn').disabled = false;
       return;
@@ -3880,6 +4129,7 @@ async function refreshMontageResult() {
       if (data.status !== 'publishing' && data.cover_status !== 'generating') {
         clearInterval(montagePollTimer);
         montagePollTimer = null;
+        montageActive = false;
       }
       document.getElementById('montageResultsCard').classList.add('active');
       const info = document.getElementById('montageResultInfo');
@@ -4283,6 +4533,7 @@ projectPreviewVideo.addEventListener('loadedmetadata', () => {
 });
 mountOverlayTimeline();
 updateSubtitlePreviewStyle();
+updateAutozoomDependencyNote();
 
 loadAnimationOptions();
 refreshProjects();

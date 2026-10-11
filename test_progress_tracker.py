@@ -13,6 +13,7 @@ from montage.progress_tracker import (
     SKIPPED,
     ProgressTracker,
     Stage,
+    failed_snapshot,
     montage_plan,
 )
 
@@ -57,6 +58,7 @@ class ProgressTrackerTest(unittest.TestCase):
         tracker.complete("s0")
         self.assertEqual(tracker.overall(), 50.0)
         tracker.complete("s1")
+        tracker.finish()
         self.assertEqual(tracker.overall(), 100.0)
 
     def test_aggregate_never_goes_back_when_unfinished(self):
@@ -83,6 +85,15 @@ class ProgressTrackerTest(unittest.TestCase):
         tracker.finish()
         self.assertEqual(tracker.overall(), 100.0)
 
+    def test_all_stages_completed_still_caps_before_finish(self):
+        tracker = make_tracker(50, 50)
+        tracker.complete("s0")
+        tracker.complete("s1")
+        self.assertEqual(tracker.status, "running")
+        self.assertEqual(tracker.overall(), 99.9)
+        tracker.finish()
+        self.assertEqual(tracker.overall(), 100.0)
+
     def test_indeterminate_stage_flagged(self):
         tracker = make_tracker(100)
         tracker.start("s0")
@@ -95,6 +106,19 @@ class ProgressTrackerTest(unittest.TestCase):
         tracker = make_tracker(80, 20)
         tracker.skip("s0")
         tracker.complete("s1")
+        self.assertLess(tracker.overall(), 100.0)
+        tracker.finish()
+        self.assertEqual(tracker.overall(), 100.0)
+
+    def test_warning_surfaces_and_keeps_completed(self):
+        tracker = make_tracker(100)
+        tracker.complete("s0", "готово", warning="использован резерв")
+        snap = tracker.snapshot()
+        self.assertEqual(snap["status"], "running")
+        self.assertEqual(snap["warning"], "использован резерв")
+        self.assertEqual(snap["stages"][0]["warning"], "использован резерв")
+        tracker.finish("Завершено с предупреждением")
+        self.assertEqual(tracker.snapshot()["status"], "completed")
         self.assertEqual(tracker.overall(), 100.0)
 
     def test_failed_stage_keeps_partial_progress(self):
@@ -162,6 +186,37 @@ class MontagePlanSerializationTest(unittest.TestCase):
         tracker = make_tracker(10)
         tracker.update("s0", 50)
         json.dumps(tracker.snapshot())
+
+
+class FailedSnapshotTest(unittest.TestCase):
+    def _snapshot(self):
+        tracker = make_tracker(40, 40, 20)
+        tracker.complete("s0", "готово")
+        tracker.start("s1", "работаем")
+        tracker.update("s1", 55)
+        return tracker.snapshot()
+
+    def test_marks_running_stage_failed(self):
+        snap = self._snapshot()
+        failed = failed_snapshot(snap, "boom")
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"], "boom")
+        self.assertIsNone(failed["active_stage"])
+        self.assertFalse(failed["indeterminate"])
+        stages = {s["key"]: s for s in failed["stages"]}
+        self.assertEqual(stages["s0"]["status"], "completed")
+        self.assertEqual(stages["s0"]["progress"], 100.0)
+        self.assertEqual(stages["s1"]["status"], "failed")
+        self.assertEqual(stages["s1"]["error"], "boom")
+        self.assertEqual(stages["s2"]["status"], "skipped")
+
+    def test_json_serializable(self):
+        json.dumps(failed_snapshot(self._snapshot(), "boom"))
+
+    def test_handles_empty_snapshot(self):
+        failed = failed_snapshot(None, "boom")
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["stages"], [])
 
 
 if __name__ == "__main__":

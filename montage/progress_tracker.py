@@ -42,7 +42,7 @@ class Stage:
 
     __slots__ = (
         "key", "label", "weight", "status", "progress", "detail",
-        "error", "started_at", "finished_at", "parent",
+        "error", "warning", "started_at", "finished_at", "parent",
     )
 
     def __init__(self, key: str, label: str, weight: float = 1.0,
@@ -54,6 +54,7 @@ class Stage:
         self.progress: Optional[float] = None
         self.detail = ""
         self.error = ""
+        self.warning = ""
         self.started_at: Optional[float] = None
         self.finished_at: Optional[float] = None
         self.parent = parent
@@ -83,6 +84,7 @@ class Stage:
             "indeterminate": self.indeterminate,
             "detail": self.detail,
             "error": self.error,
+            "warning": self.warning,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "parent": self.parent,
@@ -161,7 +163,7 @@ class ProgressTracker:
                 self.status = RUNNING
             self._touch()
 
-    def complete(self, key: str, detail: str = "") -> None:
+    def complete(self, key: str, detail: str = "", warning: str = "") -> None:
         with self._lock:
             stage = self._stages[key]
             stage.status = COMPLETED
@@ -169,6 +171,8 @@ class ProgressTracker:
             stage.finished_at = time.time()
             if detail:
                 stage.detail = detail
+            if warning:
+                stage.warning = warning
             if self.status in (PENDING, RUNNING):
                 # operation stays RUNNING until finish() is called
                 self.status = RUNNING
@@ -225,6 +229,9 @@ class ProgressTracker:
     def has_indeterminate(self) -> bool:
         return any(s.indeterminate for s in self._plan())
 
+    def warnings(self) -> List[str]:
+        return [s.warning for s in self._plan() if s.warning]
+
     def overall(self) -> float:
         with self._lock:
             plan = self._plan()
@@ -236,7 +243,10 @@ class ProgressTracker:
             acc = sum(s.weight * s.fraction() for s in plan)
             pct = acc / total_weight * 100.0
             all_done = all(s.status == COMPLETED for s in plan)
-            if not all_done:
+            # 100% is reserved for a genuinely finished operation: while the
+            # operation has not been confirmed complete we never reach 100,
+            # even if every stage reports done (spec 1.3).
+            if self.status != COMPLETED or not all_done:
                 pct = min(pct, 99.9)
             if self._allow_backwards:
                 self._allow_backwards = False
@@ -256,6 +266,7 @@ class ProgressTracker:
         with self._lock:
             overall = self.overall()
             active = self.active_stage()
+            warnings = self.warnings()
             return {
                 "operation_id": self.operation_id,
                 "kind": self.kind,
@@ -266,6 +277,8 @@ class ProgressTracker:
                 "active_stage": active.key if active else None,
                 "detail": self.detail or (active.detail if active else ""),
                 "error": self.error,
+                "warning": warnings[0] if warnings else "",
+                "warnings": warnings,
                 "created_at": self.created_at,
                 "updated_at": self.updated_at,
                 "finished_at": self.finished_at,
@@ -275,6 +288,55 @@ class ProgressTracker:
 
 
 # ----------------------------------------------------------------- helpers --
+
+def failed_snapshot(snapshot: Optional[Dict[str, Any]], error: str) -> Dict[str, Any]:
+    """Turn the last known operation snapshot into a coherent failed state.
+
+    The stage that was running (or, failing that, the first one still pending)
+    is marked failed and carries the error text; the remaining pending stages
+    are marked skipped so the UI never keeps a spinner spinning after the
+    server already finished with an error.  Completed stages are preserved.
+    """
+    snap: Dict[str, Any] = dict(snapshot or {})
+    stages = [dict(s) for s in (snap.get("stages") or []) if isinstance(s, dict)]
+    now = time.time()
+    target_marked = False
+    for stage in stages:
+        if stage.get("status") == RUNNING:
+            stage["status"] = FAILED
+            stage["error"] = error
+            stage["detail"] = error
+            stage["indeterminate"] = False
+            stage["finished_at"] = now
+            target_marked = True
+            break
+    if not target_marked:
+        for stage in stages:
+            if stage.get("status") == PENDING:
+                stage["status"] = FAILED
+                stage["error"] = error
+                stage["detail"] = error
+                stage["indeterminate"] = False
+                stage["finished_at"] = now
+                target_marked = True
+                break
+    for stage in stages:
+        if stage.get("status") == PENDING:
+            stage["status"] = SKIPPED
+            stage["detail"] = stage.get("detail") or "Не выполнялся (операция прервана)"
+            stage["indeterminate"] = False
+            stage["finished_at"] = now
+    snap["stages"] = stages
+    snap["status"] = FAILED
+    snap["error"] = error
+    snap["detail"] = error
+    snap["indeterminate"] = False
+    snap["active_stage"] = None
+    snap.setdefault("version", 0)
+    snap["version"] = int(snap.get("version") or 0) + 1
+    snap["finished_at"] = now
+    return snap
+
 
 def stage_specs_to_stages(specs: Iterable[Dict[str, Any]]) -> List[Stage]:
     return [Stage(s["key"], s.get("label", s["key"]),

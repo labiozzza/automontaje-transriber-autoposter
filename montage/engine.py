@@ -17,7 +17,7 @@ from types import ModuleType
 from typing import Any, Callable
 
 from .audio_censor import build_volume_filter, find_mute_intervals, needs_word_alignment
-from .progress_tracker import ProgressTracker, montage_plan
+from .progress_tracker import PENDING, ProgressTracker, montage_plan
 from .secrets_env import load_secrets_env, get_software_defaults, media_repo_dir
 
 MONAGE_DIR = Path(__file__).resolve().parent
@@ -147,6 +147,26 @@ def run_cmd(
                     pass
         proc.stdout.close()
         return proc.wait()
+
+
+def usable_video(path: Path | str | None) -> bool:
+    """True when *path* points to a non-empty file with a real video stream."""
+    if not path:
+        return False
+    candidate = Path(path)
+    try:
+        if not candidate.is_file() or candidate.stat().st_size <= 0:
+            return False
+    except OSError:
+        return False
+    try:
+        probe = ffprobe(candidate)
+    except Exception:
+        return False
+    for stream in probe.get("streams") or []:
+        if stream.get("codec_type") == "video" and int(stream.get("width") or 0) > 0:
+            return True
+    return False
 
 
 def run_ffmpeg_progress(
@@ -772,8 +792,8 @@ def render_montage(
     else:
         _skip("animation", "Нет слоёв для наложения")
 
-    if not final_mp4.exists():
-        raise RuntimeError("Не создан итоговый файл")
+    if not usable_video(final_mp4):
+        raise RuntimeError("Не создан пригодный итоговый файл")
 
     blur_banned_words = bool(options.get("blur_banned_words", False))
     censor_srt_text = str(options.get("audio_censor_srt") or srt_text)
@@ -840,18 +860,26 @@ def render_montage(
             preview_code = preview_future.result()
         except Exception:
             preview_code = 1
-    if delivery_code != 0 or not delivery_mp4.exists():
-        delivery_mp4 = final_mp4
-        tracker.complete("finalize", "Используется исходный поток")
-        _emit()
-    else:
+    if delivery_code == 0 and usable_video(delivery_mp4):
         _done("finalize", "Финальный файл готов")
-    if preview_code != 0 or not preview_mp4.exists():
-        preview_mp4 = delivery_mp4
-        tracker.complete("preview", "Preview не создан")
+    elif usable_video(final_mp4):
+        # Delivery encode failed but the previous full-quality stream is a
+        # usable result — keep it, but never claim an unqualified success.
+        delivery_mp4 = final_mp4
+        warning = "Финальное кодирование H.265 не удалось, используется исходный поток"
+        tracker.complete("finalize", warning, warning=warning)
         _emit()
     else:
+        raise RuntimeError("Не удалось создать итоговый файл: кодирование завершилось без пригодного результата")
+    if preview_code == 0 and usable_video(preview_mp4):
         _done("preview", "Preview готов")
+    elif usable_video(delivery_mp4):
+        preview_mp4 = delivery_mp4
+        warning = "Превью не создано, для просмотра используется финальный файл"
+        tracker.complete("preview", warning, warning=warning)
+        _emit()
+    else:
+        raise RuntimeError("Не удалось создать ни финальный файл, ни превью")
 
     timeline_data: dict[str, Any] = {
         "subtitle_position": subtitle_position,
@@ -903,7 +931,9 @@ def render_montage(
         if tracker.stage(key).status == PENDING:
             tracker.skip(key, "Этап не выполнялся")
     _done("verify", "Проверка результата")
-    tracker.finish("Рендер завершён")
+    warnings = tracker.warnings()
+    meta["warnings"] = warnings
+    tracker.finish("Рендер завершён с предупреждениями" if warnings else "Рендер завершён")
     _emit()
     return meta
 
