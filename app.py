@@ -42,6 +42,20 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 # In-memory job storage
 jobs = {}
 job_queues = {}
+
+# Per-job publish locks (single-process uvicorn limited). All job state lives
+# in memory, so this app is designed for exactly one server process; running
+# uvicorn with --workers > 1 (or any multi-process deployment) would require a
+# cross-process lock (e.g. a DB row / Redis / file lock) instead of these.
+publish_locks: dict[str, asyncio.Lock] = {}
+
+
+def _publish_lock(job_id: str) -> asyncio.Lock:
+    lock = publish_locks.get(job_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        publish_locks[job_id] = lock
+    return lock
 whisper_models = {}
 WHISPER_PROGRESS_LOCK = threading.Lock()
 WHISPER_JOB_LOCK = threading.RLock()
@@ -1762,7 +1776,7 @@ async def process_custom_cover(job_id: str, timestamp: float, title: str) -> Non
         _save_montage_job(job_id)
 
 
-async def process_publish(job_id: str, targets: list):
+async def process_publish(job_id: str, targets: list, publish_lock: Optional[asyncio.Lock] = None):
     job = jobs[job_id]
     loop = asyncio.get_running_loop()
     try:
@@ -1978,6 +1992,11 @@ async def process_publish(job_id: str, targets: list):
             _recover_publish_outcomes(job)
         _save_montage_job(job_id)
         await broadcast_progress(job_id, 0, "error", str(e))
+    finally:
+        # Release the per-job lock on success, on error and on cancellation so
+        # a retry is never blocked by a stale lock.
+        if publish_lock is not None and publish_lock.locked():
+            publish_lock.release()
 
 
 def download_face_model(job_id: str, progress):
@@ -2565,10 +2584,13 @@ async def publish_montage(
     text: str = Form(""),
     cover_id: str = Form(""),
     new_publication: bool = Form(False),
+    confirm_unknown: bool = Form(False),
 ):
     if job_id not in jobs or jobs[job_id].get("kind") != "montage":
         raise HTTPException(404, "Montage job not found")
     job = jobs[job_id]
+    if job["status"] == "publishing":
+        raise HTTPException(409, "Публикация уже выполняется для этого ролика")
     if job["status"] != "done" or not job.get("result"):
         raise HTTPException(400, "Сначала завершите рендер")
     try:
@@ -2602,6 +2624,23 @@ async def publish_montage(
         target_ids = [target_id for target_id in target_ids if target_id not in already_published]
         if not target_ids:
             raise HTTPException(400, "Все выбранные цели уже успешно опубликованы")
+    # A platform whose outcome is unknown must not be re-published without an
+    # explicit per-request confirmation.  new_publication does NOT bypass this.
+    publish_status = job.get("publish_status") or {}
+    publish_unknown = job.get("publish_unknown") or {}
+    unknown_needing_confirm = [
+        target_id for target_id in target_ids
+        if publish_status.get(target_id) == "unknown" or target_id in publish_unknown
+    ]
+    if unknown_needing_confirm and not confirm_unknown:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "Требуется подтверждение повторной публикации: "
+                          + ", ".join(unknown_needing_confirm),
+                "confirm_targets": unknown_needing_confirm,
+            },
+        )
     if any(target_id.startswith("youtube") for target_id in target_ids) and not title.strip():
         raise HTTPException(400, "Для YouTube укажите заголовок")
     targets = []
@@ -2624,10 +2663,22 @@ async def publish_montage(
             target["text"] = text.strip()
             target["caption"] = text.strip()
         targets.append(target)
-    job["selected_cover_id"] = cover_id
-    job["last_publish_targets"] = targets
-    _save_montage_job(job_id)
-    asyncio.create_task(process_publish(job_id, targets))
+    # Atomic per-job reservation: acquire the lock before creating the
+    # background task so two near-simultaneous requests can never start two
+    # publications for the same job_id.
+    lock = _publish_lock(job_id)
+    if lock.locked():
+        raise HTTPException(409, "Публикация уже выполняется для этого ролика")
+    await lock.acquire()
+    try:
+        job["selected_cover_id"] = cover_id
+        job["last_publish_targets"] = targets
+        _save_montage_job(job_id)
+        asyncio.create_task(process_publish(job_id, targets, publish_lock=lock))
+    except BaseException:
+        if lock.locked():
+            lock.release()
+        raise
     return {"job_id": job_id, "status": "publishing", "targets": [t.get("kind") for t in targets]}
 
 

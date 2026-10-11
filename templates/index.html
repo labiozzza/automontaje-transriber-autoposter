@@ -4342,12 +4342,14 @@ async function publishMontage() {
     return;
   }
   const unknownSelected = targets.filter(tid => (window.__publishUnknown || []).includes(tid));
+  let confirmUnknown = false;
   if (unknownSelected.length) {
     const confirmed = window.confirm(
       'Выбранные площадки ранее завершились с неизвестным результатом: ' + unknownSelected.join(', ') +
       '.\nОтправлять публикацию повторно?'
     );
     if (!confirmed) return;
+    confirmUnknown = true;
   }
   const title = document.getElementById('montagePublishTitle').value.trim();
   const text = document.getElementById('montagePublishText').value.trim();
@@ -4359,6 +4361,7 @@ async function publishMontage() {
   form.append('targets_json', JSON.stringify(targets));
   form.append('title', title);
   form.append('text', text);
+  if (confirmUnknown) form.append('confirm_unknown', 'true');
   if (window.__forceNewPublication) form.append('new_publication', 'true');
   if (window.__selectedCoverId) form.append('cover_id', window.__selectedCoverId);
   document.getElementById('montagePublishBtn').disabled = true;
