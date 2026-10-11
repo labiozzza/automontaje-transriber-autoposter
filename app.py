@@ -1010,7 +1010,7 @@ load_secrets_env()
 from montage import engine as montage_engine
 from montage import cover_generator
 from montage import drawing_generator
-from montage.progress_tracker import failed_snapshot
+from montage.progress_tracker import failed_snapshot, ProgressTracker, Stage
 
 _drawing_generation_lock = asyncio.Lock()
 _drawing_generation_jobs: dict[str, dict[str, Any]] = {}
@@ -1355,6 +1355,7 @@ def _cleanup_publish_artifacts(job_id: str, job: dict) -> dict:
             (workdir / "publish_mirrored", True),
             (workdir / "staging", True),
             (workdir / "youtube_staging", True),
+            (workdir / _PUBLISH_PREP_DIR, True),
             (workdir / f"{job_id}_tg.mp4", False),
         ]
         return _cleanup_allowed_paths(job_id, job, "publish", candidates)
@@ -1592,6 +1593,386 @@ async def process_mirror_variant(job_id: str) -> None:
     await _montage_announce(job_id, f"Отражённая версия готова: {path.name}")
 
 
+# --------------------------------------------------------------------------
+# Pre-publication preparation (task: "publish only sends ready files").
+#
+# Publishing must never run FFmpeg/PIL — no transcoding, FPS normalisation,
+# mirroring or cover conversion.  Every local video/image transform happens
+# here: during the montage stage or in the dedicated "prepare for publishing"
+# operation.  The ready artefacts are stored on the job
+# (``job["publish_prep"]``) together with their purpose, readiness, size/params,
+# source signature and validation result.  A prepared file is reused while its
+# signature matches the current source and montage parameters, so a single file
+# serves several platforms (Instagram trial + feed share one ``instagram`` file).
+# --------------------------------------------------------------------------
+
+_PUBLISH_PREP_DIR = "publish_prep"
+
+_TARGET_PURPOSE = {
+    "instagram": "instagram",
+    "trial": "instagram",
+    "threads": "instagram",
+    "youtube": "youtube",
+    "telegram": "telegram",
+}
+
+_PURPOSE_LABELS = {
+    "instagram": "Instagram",
+    "youtube": "YouTube",
+    "telegram": "Telegram",
+}
+
+_PREP_VIDEO_LABELS = {
+    "instagram": "Подготовка видео для Instagram",
+    "youtube": "Подготовка видео для YouTube",
+    "telegram": "Подготовка видео для Telegram",
+}
+
+_PREP_COVER_PURPOSES = ("instagram", "youtube")
+
+_PUBLISH_TARGET_SPECS = {
+    "instagram_trial": ("trial", False, "Instagram пробное"),
+    "instagram_trial_mirrored": ("trial", True, "Instagram пробное перевёрнутое"),
+    "instagram_feed": ("instagram", False, "Instagram основная лента"),
+    "instagram_feed_mirrored": ("instagram", True, "Instagram основная лента перевёрнутое"),
+    "youtube": ("youtube", False, "YouTube"),
+    "youtube_mirrored": ("youtube", True, "YouTube перевёрнутое"),
+}
+
+
+def _default_prepare_targets(job: dict) -> list:
+    """Standard publish variants prepared right after the montage render."""
+    targets = [
+        {"id": "instagram_feed", "kind": "instagram", "mirrored": False},
+        {"id": "youtube", "kind": "youtube", "mirrored": False},
+    ]
+    if mirror_variant_ready(job):
+        targets.append({"id": "instagram_feed_mirrored", "kind": "instagram", "mirrored": True})
+        targets.append({"id": "youtube_mirrored", "kind": "youtube", "mirrored": True})
+    return targets
+
+
+def _public_publish_ready(job: dict) -> dict:
+    ready = {}
+    for target_id, (kind, mirrored, _label) in _PUBLISH_TARGET_SPECS.items():
+        purpose = _TARGET_PURPOSE.get(kind)
+        ready[target_id] = bool(purpose) and _prepared_video_entry(job, purpose, mirrored) is not None
+    return ready
+
+
+def _prep_key(purpose: str, mirrored: bool) -> str:
+    return f"{purpose}:{'mirror' if mirrored else 'main'}"
+
+
+def _file_identity(path) -> str:
+    try:
+        stat = Path(path).stat()
+        return f"{Path(path).resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+    except OSError:
+        return str(path)
+
+
+def _publish_prep_signature(job: dict, key: str, source_path) -> str:
+    parts = [key, _file_identity(source_path)]
+    if key.endswith(":mirror"):
+        parts.append(_mirrored_variant_signature(job))
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _publish_prep_entries(job: dict) -> dict:
+    entries = job.get("publish_prep")
+    if not isinstance(entries, dict):
+        entries = {}
+        job["publish_prep"] = entries
+    return entries
+
+
+def _prep_source_video(job: dict, mirrored: bool) -> Optional[Path]:
+    """The current source video for a variant (main result or mirrored file)."""
+    if mirrored:
+        if not mirror_variant_ready(job):
+            return None
+        path = Path(str(_mirror_variant_entry(job).get("path")))
+        return path if path.is_file() else None
+    result = job.get("result") or {}
+    path = result.get("result_video")
+    if not path:
+        return None
+    path = Path(str(path))
+    return path if path.is_file() else None
+
+
+def _prepared_video_entry(job: dict, purpose: str, mirrored: bool) -> Optional[dict]:
+    """Return a ready, non-stale prepared video entry for purpose/mirrored."""
+    key = _prep_key(purpose, mirrored)
+    entry = _publish_prep_entries(job).get(key)
+    if not isinstance(entry, dict) or not entry.get("ready"):
+        return None
+    source = _prep_source_video(job, mirrored)
+    if source is None:
+        return None
+    if entry.get("signature") != _publish_prep_signature(job, key, source):
+        return None
+    path = entry.get("path")
+    if not path or not Path(str(path)).is_file():
+        return None
+    return entry
+
+
+def _prepared_cover_entry(job: dict, purpose: str, cover_path) -> Optional[dict]:
+    """Return a ready prepared cover for *cover_path* (Instagram/YouTube)."""
+    if not cover_path:
+        return None
+    cover_path = Path(str(cover_path))
+    if not cover_path.is_file():
+        return None
+    key = f"cover:{purpose}"
+    entry = _publish_prep_entries(job).get(key)
+    if not isinstance(entry, dict) or not entry.get("ready"):
+        return None
+    if entry.get("signature") != _publish_prep_signature(job, key, cover_path):
+        return None
+    path = entry.get("path")
+    if not path or not Path(str(path)).is_file():
+        return None
+    return entry
+
+
+def _render_prepared_video(purpose: str, source, target_dir, stem: str,
+                           mirrored: bool, progress) -> Path:
+    """Produce the platform-ready video (local transform; run off the event loop)."""
+    source = Path(source)
+    target_dir = Path(target_dir)
+    if purpose == "youtube":
+        from montage.youtube_publisher import YouTubePublisher
+        publisher = YouTubePublisher(
+            montage_engine.INSTAPOSTER_DIR, Path(sys.executable),
+            target_dir / "youtube.log",
+        )
+        output = target_dir / f"{stem}_youtube.mp4"
+        publisher.prepare_video(source, output, progress)
+        return output
+    if purpose == "telegram":
+        try:
+            duration = float(montage_engine.ffprobe(source).get("format", {}).get("duration") or 0) or 30.0
+        except Exception:
+            duration = 30.0
+        output = target_dir / f"{stem}_tg.mp4"
+        montage_engine._transcode_to_fit(source, output, 45 * 1024 * 1024, duration, progress)
+        return output
+    from montage.instagram_publisher import InstagramPublisher
+    publisher = InstagramPublisher(
+        montage_engine.INSTAPOSTER_DIR, shutil.which("ffmpeg") or "ffmpeg",
+        target_dir / "publish.log", lambda message: None,
+    )
+    return publisher.prepare_variant(source, target_dir, stem, "normal", progress)
+
+
+def _render_prepared_cover(purpose: str, cover_path, output) -> Path:
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if purpose == "youtube":
+        from montage.youtube_publisher import YouTubePublisher
+        publisher = YouTubePublisher(
+            montage_engine.INSTAPOSTER_DIR, Path(sys.executable),
+            output.parent / "youtube.log",
+        )
+        publisher.prepare_thumbnail(Path(cover_path), output)
+        return output
+    from PIL import Image
+    with Image.open(cover_path) as image:
+        image.convert("RGB").save(output, "JPEG", quality=94, optimize=True)
+    return output
+
+
+def _validate_prepared_video(path) -> dict:
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size == 0:
+        raise RuntimeError("Подготовленный файл не создан или пуст")
+    try:
+        probe = montage_engine.ffprobe(path)
+    except Exception as exc:
+        raise RuntimeError(f"Подготовленный файл повреждён: {exc}") from exc
+    duration = (probe.get("format") or {}).get("duration")
+    return {"size": path.stat().st_size, "duration": duration}
+
+
+def _preparation_error_message(target: dict) -> str:
+    mirrored = bool(target.get("mirrored"))
+    suffix = " (перевёрнутое)" if mirrored else ""
+    return (
+        f"Видео для цели «{target.get('label') or target.get('id')}»{suffix} не подготовлено. "
+        "Нажмите «Подготовить к публикации» в разделе монтажа и повторите публикацию."
+    )
+
+
+def _publish_readiness(job: dict, targets: list) -> tuple[dict, list]:
+    """Resolve prepared artefacts for resolved publish targets.
+
+    Returns ``(prepared, missing)`` where *prepared* maps a target id to its
+    ready paths (video + optional cover/thumbnail) and *missing* lists targets
+    that still need local preparation.  Publishing uses only ready files.
+    """
+    prepared: dict[str, dict] = {}
+    missing: list[dict] = []
+    for target in targets:
+        purpose = _TARGET_PURPOSE.get(str(target.get("kind") or ""))
+        target_id = str(target.get("id") or target.get("kind") or "")
+        mirrored = bool(target.get("mirrored"))
+        entry = _prepared_video_entry(job, purpose, mirrored) if purpose else None
+        if entry is None:
+            missing.append({"target": target_id, "label": target.get("label"), "reason": "video"})
+            continue
+        item: dict = {"video_path": entry.get("path")}
+        cover = target.get("cover_path")
+        if cover:
+            cover_entry = _prepared_cover_entry(job, purpose, cover)
+            if cover_entry is None:
+                missing.append({"target": target_id, "label": target.get("label"), "reason": "cover"})
+                continue
+            if purpose == "youtube":
+                item["thumbnail_path"] = cover_entry.get("path")
+            else:
+                item["cover_path"] = cover_entry.get("path")
+        prepared[target_id] = item
+    return prepared, missing
+
+
+async def process_prepare_publish(job_id: str, targets: list, cover_path: Optional[str] = None,
+                                  cover_id: str = ""):
+    """Prepare (locally) every artefact the given publish targets need.
+
+    Runs the platform-specific video transforms and cover conversions *before*
+    publishing, stores the results on the job and records a stage snapshot that
+    the three-level progress bar renders.  Reuses already prepared artefacts.
+    """
+    job = jobs.get(job_id)
+    if not job or job.get("kind") != "montage":
+        return
+    workdir = MONTAGE_WORK / job_id
+    prep_dir = workdir / _PUBLISH_PREP_DIR
+    prep_dir.mkdir(parents=True, exist_ok=True)
+
+    needs: list[dict] = []
+    seen: set = set()
+    for target in targets:
+        purpose = _TARGET_PURPOSE.get(str(target.get("kind") or ""))
+        if not purpose:
+            continue
+        mirrored = bool(target.get("mirrored"))
+        key = _prep_key(purpose, mirrored)
+        if key in seen:
+            continue
+        seen.add(key)
+        needs.append({"kind": "video", "key": key, "purpose": purpose, "mirrored": mirrored})
+    requested_purposes = {item["purpose"] for item in needs}
+    if cover_path:
+        for purpose in _PREP_COVER_PURPOSES:
+            if purpose not in requested_purposes:
+                continue
+            key = f"cover:{purpose}"
+            if key in seen:
+                continue
+            seen.add(key)
+            needs.append({"kind": "cover", "key": key, "purpose": purpose, "mirrored": False})
+
+    if not needs:
+        job["prepare_operation"] = None
+        job["prepare_status"] = "done"
+        _save_montage_job(job_id)
+        return
+
+    stages = []
+    for item in needs:
+        if item["kind"] == "video":
+            label = _PREP_VIDEO_LABELS[item["purpose"]]
+            if item["mirrored"]:
+                label += " (отражённое)"
+            stages.append(Stage(item["key"], label, 3.0))
+        else:
+            stages.append(Stage(item["key"], f"Подготовка обложки для {_PURPOSE_LABELS[item['purpose']]}", 1.0))
+
+    def on_change(tracker: ProgressTracker) -> None:
+        job["prepare_operation"] = tracker.snapshot()
+
+    tracker = ProgressTracker(f"{job_id}:prepare", "publish_prepare", stages,
+                              label="Подготовка к публикации", on_change=on_change)
+    job["prepare_status"] = "running"
+    job["prepare_error"] = None
+    job["prepare_operation"] = tracker.snapshot()
+    _save_montage_job(job_id)
+    await _montage_announce(job_id, "Подготовка файлов к публикации...")
+
+    try:
+        for item in needs:
+            key = item["key"]
+            tracker.start(key, "Подготовка")
+            if item["kind"] == "video":
+                source = _prep_source_video(job, item["mirrored"])
+                if source is None:
+                    raise RuntimeError(
+                        "Отражённая версия не подготовлена."
+                        if item["mirrored"] else "Видео ещё не готово."
+                    )
+                existing = _prepared_video_entry(job, item["purpose"], item["mirrored"])
+                if existing is not None:
+                    tracker.complete(key, "Уже подготовлено")
+                    continue
+                stem = f"{job_id}_{key.replace(':', '_')}"
+
+                def video_progress(percent, detail, _key=key):
+                    tracker.update(_key, percent, detail)
+
+                path = await asyncio.to_thread(
+                    _render_prepared_video, item["purpose"], source, prep_dir, stem,
+                    item["mirrored"], video_progress,
+                )
+                info = _validate_prepared_video(path)
+                _publish_prep_entries(job)[key] = {
+                    "path": str(path),
+                    "purpose": item["purpose"],
+                    "kind": "video",
+                    "mirrored": item["mirrored"],
+                    "ready": True,
+                    "signature": _publish_prep_signature(job, key, source),
+                    "size": info["size"],
+                    "duration": info.get("duration"),
+                    "validation": {"ok": True, "detail": f"{info['size']} байт"},
+                    "created_at": time.time(),
+                }
+                tracker.complete(key, f"Готово: {Path(path).name}")
+            else:
+                existing = _prepared_cover_entry(job, item["purpose"], cover_path)
+                if existing is not None:
+                    tracker.complete(key, "Уже подготовлено")
+                    continue
+                output = prep_dir / f"{job_id}_cover_{item['purpose']}.jpg"
+                await asyncio.to_thread(_render_prepared_cover, item["purpose"], cover_path, output)
+                if not output.is_file() or output.stat().st_size == 0:
+                    raise RuntimeError("Не удалось подготовить обложку")
+                _publish_prep_entries(job)[key] = {
+                    "path": str(output),
+                    "purpose": item["purpose"],
+                    "kind": "cover",
+                    "cover_id": cover_id,
+                    "ready": True,
+                    "signature": _publish_prep_signature(job, key, cover_path),
+                    "size": output.stat().st_size,
+                    "created_at": time.time(),
+                }
+                tracker.complete(key, f"Готово: {output.name}")
+        tracker.finish("Файлы для публикации готовы")
+        job["prepare_status"] = "done"
+        _save_montage_job(job_id)
+        await _montage_announce(job_id, "Файлы для публикации готовы")
+    except BaseException as exc:
+        job["prepare_operation"] = failed_snapshot(tracker.snapshot(), str(exc))
+        job["prepare_status"] = "error"
+        job["prepare_error"] = str(exc)
+        _save_montage_job(job_id)
+        await _montage_announce(job_id, f"Подготовка к публикации не удалась: {exc}")
+
+
 def _recover_publish_outcomes(job: dict) -> None:
     """Classify per-platform publish outcomes after an interrupted publish.
 
@@ -1800,6 +2181,10 @@ def _recover_montage_jobs() -> None:
             "operation": None,
             "variants": {},
             "mirror_variant": None,
+            "publish_prep": {},
+            "prepare_operation": None,
+            "prepare_status": "idle",
+            "prepare_error": None,
         }
         _save_montage_job(job_id)
         _run_cleanup_safely(_cleanup_render_artifacts, job_id, jobs[job_id])
@@ -2077,6 +2462,25 @@ async def process_publish(job_id: str, targets: list, publish_lock: Optional[asy
                     target["preparation_error"] = message
                 await _montage_announce(job_id, message)
 
+        # Publishing only sends ready files: resolve the artefacts produced by
+        # the preparation stage.  Anything missing is reported per target
+        # instead of transcoding here (spec: publish must not run FFmpeg).
+        prepared_targets, missing_targets = _publish_readiness(job, targets)
+        for item in missing_targets:
+            target_id = item.get("target")
+            if target_id and target_id in job["publish_progress"]:
+                job["publish_progress"][target_id].update(
+                    status="error", progress=0,
+                    detail=_preparation_error_message(item),
+                )
+        for target in targets:
+            target_id = str(target.get("id") or target.get("kind") or "")
+            if target_id and target_id not in prepared_targets:
+                target["preparation_error"] = _preparation_error_message(target)
+        if missing_targets:
+            labels = ", ".join(str(item.get("label") or item.get("target")) for item in missing_targets)
+            await _montage_announce(job_id, f"Не подготовлены к публикации: {labels}")
+
         await _montage_announce(job_id, "Публикация...")
 
         def publish_progress(percent: float, stage: str, detail: str) -> None:
@@ -2148,6 +2552,7 @@ async def process_publish(job_id: str, targets: list, publish_lock: Optional[asy
             original_video=Path(job["video_path"]),
             transcript_text=str(job.get("srt_text") or ""),
             targets=targets,
+            prepared_targets=prepared_targets,
             progress_cb=publish_progress,
             target_progress_cb=target_progress,
             confirmed_cb=confirmed_publish,
@@ -2610,6 +3015,7 @@ async def start_montage(
     cover_title: str = Form(""),
     zoom_timeline_json: Optional[str] = Form(None),
     prepare_mirrored: bool = Form(False),
+    prepare_publish: bool = Form(True),
 ):
     job_id = str(uuid.uuid4())[:8]
     work_dir = MONTAGE_WORK / job_id
@@ -2802,6 +3208,10 @@ async def start_montage(
         "operation": None,
         "variants": {},
         "mirror_variant": None,
+        "publish_prep": {},
+        "prepare_operation": None,
+        "prepare_status": "idle",
+        "prepare_error": None,
     }
     params = {
         "subtitle_mode": subtitle_mode,
@@ -2829,6 +3239,7 @@ async def start_montage(
         },
         "zoom_timeline_override": zoom_override,
         "prepare_mirrored": bool(prepare_mirrored),
+        "prepare_publish": bool(prepare_publish),
     }
     jobs[job_id]["params"] = params
     _save_montage_job(job_id)
@@ -2850,8 +3261,19 @@ async def start_montage(
                 _save_projects()
     async def _run_montage_then_variant() -> None:
         await process_montage(job_id, params)
-        if params.get("prepare_mirrored") and jobs.get(job_id, {}).get("status") == "done":
+        if jobs.get(job_id, {}).get("status") != "done":
+            return
+        if params.get("prepare_mirrored"):
             await process_mirror_variant(job_id)
+        # The montage stage fully prepares the publish-ready variants so that
+        # publishing only sends ready files (spec: montage prepares, publish sends).
+        if params.get("prepare_publish", True):
+            try:
+                await process_prepare_publish(
+                    job_id, _default_prepare_targets(jobs[job_id])
+                )
+            except Exception:
+                pass
 
     asyncio.create_task(_run_montage_then_variant())
     if propose_cover:
@@ -2886,14 +3308,7 @@ async def publish_montage(
         raise HTTPException(400, "Заголовок должен быть не длиннее 119 символов")
     if len(text) > 2000:
         raise HTTPException(400, "Текст должен быть не длиннее 2000 символов")
-    target_specs = {
-        "instagram_trial": ("trial", False, "Instagram пробное"),
-        "instagram_trial_mirrored": ("trial", True, "Instagram пробное перевёрнутое"),
-        "instagram_feed": ("instagram", False, "Instagram основная лента"),
-        "instagram_feed_mirrored": ("instagram", True, "Instagram основная лента перевёрнутое"),
-        "youtube": ("youtube", False, "YouTube"),
-        "youtube_mirrored": ("youtube", True, "YouTube перевёрнутое"),
-    }
+    target_specs = _PUBLISH_TARGET_SPECS
     target_ids = list(dict.fromkeys(str(item) for item in requested_targets))
     unknown = [target_id for target_id in target_ids if target_id not in target_specs]
     if unknown:
@@ -2955,6 +3370,23 @@ async def publish_montage(
             "Отражённая версия не подготовлена. Подготовьте её в разделе монтажа "
             "перед публикацией перевёрнутого варианта.",
         )
+    # Publishing never transcodes: every selected variant (and cover) must have
+    # been prepared locally first.  Reject early with an actionable message so
+    # the UI can offer a dedicated "prepare for publishing" step (spec 1).
+    _prepared_targets, missing_targets = _publish_readiness(job, targets)
+    if missing_targets:
+        missing_labels = ", ".join(
+            str(item.get("label") or item.get("target")) for item in missing_targets
+        )
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "Публикация не запущена: файлы не подготовлены ("
+                          + missing_labels
+                          + "). Подготовьте видео к публикации в разделе монтажа.",
+                "prepare_targets": [str(item.get("target")) for item in missing_targets],
+            },
+        )
     # Atomic per-job reservation: acquire the lock before creating the
     # background task so two near-simultaneous requests can never start two
     # publications for the same job_id.
@@ -2999,6 +3431,61 @@ async def prepare_montage_mirror(job_id: str):
     _save_montage_job(job_id)
     asyncio.create_task(process_mirror_variant(job_id))
     return {"job_id": job_id, "status": "generating"}
+
+
+@app.post("/api/montage/{job_id}/prepare-publish")
+async def prepare_montage_publish(
+    job_id: str,
+    targets_json: str = Form(...),
+    cover_id: str = Form(""),
+):
+    """Locally prepare every artefact the selected publish targets need.
+
+    Publishing itself only sends ready files (spec 1); this endpoint performs
+    the video normalisation and cover conversion ahead of time.
+    """
+    if job_id not in jobs or jobs[job_id].get("kind") != "montage":
+        raise HTTPException(404, "Montage job not found")
+    job = jobs[job_id]
+    if job["status"] not in {"done", "completed"} or not job.get("result"):
+        raise HTTPException(400, "Сначала завершите рендер")
+    try:
+        requested_targets = json.loads(targets_json)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "targets_json must be valid JSON")
+    if not isinstance(requested_targets, list) or not requested_targets:
+        raise HTTPException(400, "Список целей пуст")
+    target_ids = list(dict.fromkeys(str(item) for item in requested_targets))
+    unknown = [target_id for target_id in target_ids if target_id not in _PUBLISH_TARGET_SPECS]
+    if unknown:
+        raise HTTPException(400, f"Неизвестные цели публикации: {', '.join(unknown)}")
+    cover_path = None
+    if cover_id:
+        selected_cover = next(
+            (item for item in job.get("covers") or [] if item.get("id") == cover_id), None
+        )
+        if selected_cover is None:
+            raise HTTPException(400, "Выбранная обложка не найдена")
+        candidate = MONTAGE_WORK / job_id / "covers" / Path(str(selected_cover.get("file") or "")).name
+        if not candidate.exists():
+            raise HTTPException(400, "Файл выбранной обложки недоступен")
+        cover_path = str(candidate)
+    targets = []
+    for target_id in target_ids:
+        kind, mirrored, label = _PUBLISH_TARGET_SPECS[target_id]
+        targets.append({"id": target_id, "kind": kind, "mirrored": mirrored, "label": label})
+    if job.get("prepare_status") == "running":
+        return {"job_id": job_id, "status": "running"}
+    if any(target.get("mirrored") for target in targets) and not mirror_variant_ready(job):
+        raise HTTPException(
+            409,
+            "Отражённая версия не подготовлена. Подготовьте её в разделе монтажа "
+            "перед подготовкой перевёрнутого варианта.",
+        )
+    job["selected_cover_id"] = cover_id
+    _save_montage_job(job_id)
+    asyncio.create_task(process_prepare_publish(job_id, targets, cover_path, cover_id))
+    return {"job_id": job_id, "status": "preparing"}
 
 
 _youtube_reauth_state: dict[str, str] = {"status": "idle", "detail": ""}
@@ -3062,6 +3549,10 @@ async def montage_result(job_id: str):
         "selected_cover_id": job.get("selected_cover_id") or "",
         "last_publish_targets": job.get("last_publish_targets") or [],
         "operation": job.get("operation"),
+        "prepare_operation": job.get("prepare_operation"),
+        "prepare_status": job.get("prepare_status") or "idle",
+        "prepare_error": job.get("prepare_error"),
+        "publish_ready": _public_publish_ready(job),
         "mirror_variant": _public_mirror_variant(job),
         "variants": {"mirrored_ready": mirror_variant_ready(job)},
     }

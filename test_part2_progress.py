@@ -183,6 +183,13 @@ class MirrorVariantTests(Part2Base):
                 "path": str(mirror), "signature": app_module._mirrored_variant_signature(job),
                 "ready": True, "mirror_horizontal": True, "created_at": 0,
             }}
+            job["publish_prep"] = {
+                "youtube:mirror": {
+                    "path": str(mirror), "purpose": "youtube", "kind": "video",
+                    "mirrored": True, "ready": True,
+                    "signature": app_module._publish_prep_signature(job, "youtube:mirror", mirror),
+                }
+            }
             started = []
 
             async def fake_publish(job_id_, targets, publish_lock=None):

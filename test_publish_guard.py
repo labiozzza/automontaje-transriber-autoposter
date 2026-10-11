@@ -9,6 +9,8 @@ Run:
 """
 import asyncio
 import json
+import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -18,18 +20,36 @@ import app as app_module
 
 TARGET = "instagram_trial"
 
+_PREP_DIR = tempfile.mkdtemp(prefix="publish-guard-")
+_SOURCE = os.path.join(_PREP_DIR, "result.mp4")
+with open(_SOURCE, "wb") as handle:
+    handle.write(b"source")
+
 
 def make_job(job_id, **extra):
+    prepared = os.path.join(_PREP_DIR, f"{job_id}-instagram.mp4")
+    with open(prepared, "wb") as handle:
+        handle.write(b"prepared")
     job = {
         "kind": "montage",
         "status": "done",
         "stage": "done",
         "progress": 100,
-        "result": {"result_video": "/tmp/does-not-matter.mp4"},
-        "video_path": "/tmp/does-not-matter.mp4",
+        "result": {"result_video": _SOURCE},
+        "video_path": _SOURCE,
         "params": {},
         "publish_progress": {},
         "publish_tracking": True,
+        "publish_prep": {},
+    }
+    key = "instagram:main"
+    job["publish_prep"][key] = {
+        "path": prepared,
+        "purpose": "instagram",
+        "kind": "video",
+        "mirrored": False,
+        "ready": True,
+        "signature": app_module._publish_prep_signature(job, key, _SOURCE),
     }
     job.update(extra)
     return job

@@ -278,11 +278,24 @@ class InstagramPublisher:
     def upload_to_github(self, staged: Path) -> tuple[Path, str]:
         return self.main.publish_video_to_github(staged)
 
-    def upload_cover_to_github(self, cover: Path) -> tuple[Path, str]:
-        prepared = cover.with_name(f".{cover.stem}-instagram.jpg")
+    def prepare_cover(self, cover: Path, output: Path | None = None) -> Path:
+        """Convert a cover to the JPEG that Instagram requires.
+
+        This is a local image transform, so it must run during the montage
+        preparation stage — never inside the publish path.
+        """
+        prepared = output or cover.with_name(f".{cover.stem}-instagram.jpg")
+        prepared.parent.mkdir(parents=True, exist_ok=True)
         with Image.open(cover) as image:
             image.convert("RGB").save(prepared, "JPEG", quality=94, optimize=True)
+        return prepared
+
+    def upload_cover_file(self, prepared: Path) -> tuple[Path, str]:
+        """Upload an already prepared (JPEG) cover; no local transform here."""
         return self.main.publish_image_to_github(prepared)
+
+    def upload_cover_to_github(self, cover: Path) -> tuple[Path, str]:
+        return self.upload_cover_file(self.prepare_cover(cover))
 
     def verify_public_video(self, raw_url: str, raw_ip: str, progress: Callable[[float, str], None]) -> None:
         last_error: Exception | None = None

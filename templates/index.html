@@ -430,6 +430,15 @@ select option { background: var(--surface2); }
 .ops-stage-bar { flex: 1; background: rgba(0,0,0,.35); border-radius: 4px; height: 4px; overflow: hidden; position: relative; }
 .ops-stage-bar i { display: block; height: 100%; background: var(--accent); transition: width .3s ease; }
 .ops-stage-bar i.ind { width: 40%; position: absolute; animation: opsIndeterminate 1.2s linear infinite; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+.ops-fold-toggle {
+  margin-top: 6px; background: none; border: none; padding: 2px 0; cursor: pointer;
+  color: var(--accent2); font-size: 12px; font-family: inherit; text-align: left;
+}
+.ops-fold-toggle:hover { text-decoration: underline; }
+.ops-fold-toggle .ops-caret { display: inline-block; width: 12px; transition: transform .15s ease; }
+.ops-fold.closed > .ops-fold-toggle .ops-caret { transform: rotate(-90deg); }
+.ops-fold.closed > .ops-fold-body { display: none; }
+.ops-fold-body { margin: 4px 0 8px 14px; }
 
 /* Montage sections (ordered workflow) */
 .montage-section { display: flex; flex-direction: column; gap: 14px; margin-bottom: 22px; }
@@ -1492,6 +1501,10 @@ select option { background: var(--surface2); }
           <div class="card-title" style="margin-top:20px">Отражённая версия</div>
           <div id="montageMirrorVariantInfo" style="font-size:13px;color:var(--text2)">Не подготовлена</div>
           <button class="btn" id="prepareMirrorBtn" disabled onclick="prepareMirrorVariant()">Подготовить отражённую версию</button>
+
+          <div class="card-title" style="margin-top:20px">Подготовка к публикации</div>
+          <div id="montagePrepareInfo" style="font-size:13px;color:var(--text2)">Готовится автоматически после монтажа</div>
+          <button class="btn" id="preparePublishBtn" disabled onclick="preparePublishTargets()">Подготовить к публикации</button>
         </div>
       </div>
     </section>
@@ -3914,6 +3927,20 @@ function startMontagePolling() {
 }
 
 window.__opsState = window.__opsState || {};
+window.__opsFold = window.__opsFold || {};
+
+function toggleOpsFold(key) {
+  window.__opsFold[key] = window.__opsFold[key] === false;
+  const node = document.querySelector('.ops-fold[data-fold="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
+  if (node) node.classList.toggle('closed', window.__opsFold[key] === false);
+}
+
+function applyOpsFolds() {
+  for (const node of document.querySelectorAll('.ops-fold[data-fold]')) {
+    const key = node.getAttribute('data-fold');
+    node.classList.toggle('closed', window.__opsFold[key] === false);
+  }
+}
 
 function mergeOpsState(patch) {
   if (!patch || typeof patch !== 'object') return;
@@ -3961,6 +3988,15 @@ function publishStatusText(status) {
   return map[status] || opStatusLabel(status);
 }
 
+function opsElapsed(stage) {
+  const start = Number(stage.started_at);
+  if (!start) return '';
+  const end = Number(stage.finished_at) || (Date.now() / 1000);
+  const secs = Math.max(0, end - start);
+  if (secs < 0.05) return '';
+  return secs >= 60 ? (Math.floor(secs / 60) + 'м ' + Math.round(secs % 60) + 'с') : (secs.toFixed(1) + 'с');
+}
+
 function opsStageRow(stage) {
   let dot = { pending: '', running: 'running', completed: 'done', failed: 'fail', skipped: 'skip' }[stage.status] || '';
   if (stage.warning) dot = 'warn';
@@ -3969,6 +4005,8 @@ function opsStageRow(stage) {
   bar += '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(stage.label || stage.key) + '</span>';
   bar += '<span class="ops-stage-bar">' + (pct == null && stage.status === 'running' ? '<i class="ind"></i>'
     : '<i style="width:' + (stage.status === 'completed' ? 100 : (pct == null ? 0 : pct)) + '%"></i>') + '</span>';
+  const elapsed = opsElapsed(stage);
+  if (elapsed) bar += '<span style="color:var(--text3);font-size:11px;min-width:44px;text-align:right">' + esc(elapsed) + '</span>';
   const detail = stage.error || stage.warning || stage.detail || '';
   if (detail) bar += '<span class="' + (stage.error ? 'ops-op-error' : (stage.warning ? 'ops-op-warn' : '')) + '" style="max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text3)">' + esc(detail) + '</span>';
   return '<div class="ops-stage">' + bar + '</div>';
@@ -3976,13 +4014,14 @@ function opsStageRow(stage) {
 
 function opsOpBlock(op) {
   let cls = '';
-  if (op.status === 'error' || op.status === 'failed') cls = ' ops-op-error';
+  const isFailed = op.status === 'error' || op.status === 'failed';
+  if (isFailed) cls = ' ops-op-error';
   else if (op.warning) cls = ' ops-op-warn';
   let html = '<div class="ops-op">';
   html += '<div class="ops-op-head"><span>' + esc(op.label) + '</span>';
   const statusText = op.key === 'publish' ? publishStatusText(op.status || '') : opStatusLabel(op.status || '');
   html += '<span class="' + cls + '" style="margin-left:auto;font-size:12px;color:var(--text2)">' + esc(statusText) + '</span>';
-  html += '<span style="font-size:12px;color:var(--accent2);min-width:40px;text-align:right">' + (op.progress == null ? '…' : Math.round(op.progress) + '%') + '</span></div>';
+  html += '<span style="font-size:12px;color:var(--accent2);min-width:40px;text-align:right">' + (isFailed ? '—' : (op.progress == null ? '…' : Math.round(op.progress) + '%')) + '</span></div>';
   if (op.progress == null) {
     html += '<div class="ops-op-bar-wrap"><div class="ops-op-bar ind"></div></div>';
   } else {
@@ -4000,7 +4039,12 @@ function opsOpBlock(op) {
         + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(t.label || t.id) + '</span>'
         + '<span style="color:var(--text2);font-size:12px">' + esc(t.detail || opStatusLabel(t.status)) + '</span></div>';
       if (t.steps && t.steps.length) {
-        row += '<div style="margin:4px 0 8px 14px">' + t.steps.map(opsStageRow).join('') + '</div>';
+        const foldKey = 'publish:' + (t.id || t.label);
+        const open = window.__opsFold[foldKey] !== false;
+        row += '<div class="ops-fold' + (open ? '' : ' closed') + '" data-fold="' + esc(foldKey) + '">'
+          + '<button type="button" class="ops-fold-toggle" onclick="toggleOpsFold(\'' + esc(foldKey).replace(/'/g, "\\'") + '\')">'
+          + '<span class="ops-caret">▾</span> ' + esc((t.steps.length || 0) + ' этапов') + '</button>'
+          + '<div class="ops-fold-body">' + t.steps.map(opsStageRow).join('') + '</div></div>';
       }
       return row;
     }).join('') + '</div>';
@@ -4064,6 +4108,17 @@ function buildOpsState(state) {
       detail: mv.detail || (mv.status === 'generating' ? 'Подготовка отражённой версии' : ''),
       error: mv.error || '', warning: '', stages: null });
   }
+  const prep = state.prepare_operation;
+  if (prep) {
+    ops.push({ key: 'prepare', label: 'Подготовка к публикации', status: prep.status || state.prepare_status || 'running',
+      progress: prep.progress, detail: prep.detail || '', error: prep.error || '', warning: prep.warning || '',
+      stages: prep.stages || [] });
+  } else if (state.prepare_status === 'running' || state.prepare_status === 'error') {
+    ops.push({ key: 'prepare', label: 'Подготовка к публикации', status: state.prepare_status,
+      progress: state.prepare_status === 'running' ? null : null,
+      detail: state.prepare_status === 'running' ? 'Подготовка видео к публикации' : '',
+      error: state.prepare_error || '', warning: '', stages: null });
+  }
   if (state.publish_progress) {
     const targets = Object.values(state.publish_progress);
     const values = targets.map(function(t) { return targetProgressPercent(t); });
@@ -4091,7 +4146,7 @@ function buildOpsState(state) {
 const OPS_ACTIVE_STATUSES = ['publishing', 'preparing', 'processing', 'running', 'generating', 'queued', 'partial', 'needs_check', 'unknown', 'error'];
 function pickMainOp(ops) {
   if (!ops.length) return null;
-  const order = ['publish', 'mirror_variant', 'montage', 'covers', 'drawings'];
+  const order = ['publish', 'prepare', 'mirror_variant', 'montage', 'covers', 'drawings'];
   for (const key of order) {
     const op = ops.find(function(o) { return o.key === key; });
     if (op && OPS_ACTIVE_STATUSES.includes(op.status)) return op;
@@ -4103,7 +4158,7 @@ function pickMainOp(ops) {
 
 function opsBodySignature(ops) {
   return ops.map(function(o) {
-    const stages = (o.stages || []).map(function(s) { return s.key + s.status + (s.progress == null ? 'x' : Math.round(s.progress)); }).join(',');
+    const stages = (o.stages || []).map(function(s) { return s.key + s.status + (s.progress == null ? 'x' : Math.round(s.progress)) + (s.started_at && s.status === 'running' ? 't' + Math.floor(Date.now() / 1000 - Number(s.started_at)) : ''); }).join(',');
     const targets = (o.targets || []).map(function(t) { return t.id + t.status + (t.progress == null ? 'x' : Math.round(t.progress)) + ':' + (t.steps || []).map(function(s) { return s.key + s.status; }).join(','); }).join(',');
     return o.key + o.status + Math.round(o.progress == null ? -1 : o.progress) + '|' + stages + '|' + targets + '|' + (o.warning ? 'w' : '');
   }).join('||');
@@ -4141,7 +4196,7 @@ function renderOperations(state) {
     } else if (main.progress == null) {
       pctEl.textContent = '…';
       barWrap.classList.add('indeterminate');
-      detailEl.textContent = main.detail || opStatusLabel(main.status);
+      detailEl.textContent = [main.detail, main.warning].filter(Boolean).join(' · ') || opStatusLabel(main.status);
     } else {
       const pct = Math.max(0, Math.min(100, Number(main.progress)));
       pctEl.textContent = pct.toFixed(1) + '%';
@@ -4162,6 +4217,7 @@ function renderOperations(state) {
     window.__opsBodySig = signature;
     body.innerHTML = ops.length ? ops.map(opsOpBlock).join('')
       : '<div style="font-size:12px;color:var(--text2)">Нет активных операций</div>';
+    applyOpsFolds();
   }
   const toggle = document.getElementById('operationToggle');
   if (toggle) toggle.setAttribute('aria-expanded', operationsBodyOpen ? 'true' : 'false');
@@ -4210,6 +4266,59 @@ function applyMirrorVariantState(data) {
   }
 }
 
+function publishReadyMap(state) {
+  const pr = (state && state.publish_ready) || (window.__opsState && window.__opsState.publish_ready);
+  return pr && typeof pr === 'object' ? pr : null;
+}
+
+function applyPrepareState(data) {
+  const state = data || window.__opsState || {};
+  const info = document.getElementById('montagePrepareInfo');
+  const status = state.prepare_status || (window.__opsState && window.__opsState.prepare_status) || 'idle';
+  if (info) {
+    if (status === 'running') info.textContent = 'Подготовка видео к публикации…';
+    else if (status === 'error') info.textContent = 'Ошибка подготовки: ' + (state.prepare_error || 'не удалось подготовить видео');
+    else if (status === 'done') info.textContent = 'Видео подготовлено к публикации';
+    else info.textContent = 'Готовится автоматически после монтажа';
+  }
+  const ready = publishReadyMap(state);
+  const prepareBtn = document.getElementById('preparePublishBtn');
+  const hasResult = !!(state.result || (window.__opsState && window.__opsState.result));
+  if (prepareBtn) prepareBtn.disabled = !hasResult || status === 'running';
+  if (!ready) return;
+  for (const box of document.querySelectorAll('.publish-target-checkbox')) {
+    const ok = !!ready[box.value];
+    box.disabled = !ok;
+    if (!ok) box.checked = false;
+    const label = box.parentElement;
+    if (label) label.title = ok ? '' : 'Видео для этой площадки ещё не подготовлено';
+  }
+}
+
+async function preparePublishTargets() {
+  if (!montageJobId) return;
+  const btn = document.getElementById('preparePublishBtn');
+  if (btn) btn.disabled = true;
+  const targets = ['instagram_feed', 'youtube'];
+  if (mirrorVariantReady()) { targets.push('instagram_feed_mirrored', 'youtube_mirrored'); }
+  const form = new FormData();
+  form.append('targets_json', JSON.stringify(targets));
+  if (window.__selectedCoverId) form.append('cover_id', window.__selectedCoverId);
+  try {
+    const res = await fetch('/api/montage/' + encodeURIComponent(montageJobId) + '/prepare-publish', {method: 'POST', body: form});
+    const data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
+    mergeOpsState({prepare_status: 'running'});
+    renderOperations(window.__opsState);
+    applyPrepareState(window.__opsState);
+    startMontagePolling();
+  } catch (e) {
+    const info = document.getElementById('montagePrepareInfo');
+    if (info) info.textContent = 'Ошибка: ' + e.message;
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function prepareMirrorVariant() {
   if (!montageJobId) return;
   const btn = document.getElementById('prepareMirrorBtn');
@@ -4254,6 +4363,7 @@ async function refreshMontageResult() {
     }
     renderCoverState(data);
     applyMirrorVariantState(data);
+    applyPrepareState(data);
     document.getElementById('montageStartBtn').disabled = true;
     const terminalFailure = data.status === 'error' || data.status === 'failed' || data.status === 'interrupted';
     if (terminalFailure) {
@@ -4265,10 +4375,14 @@ async function refreshMontageResult() {
       return;
     }
     if (data.result) {
-      if (data.status !== 'publishing' && data.cover_status !== 'generating') {
+      const mirrorBusy = !!(data.mirror_variant && data.mirror_variant.status === 'generating');
+      const prepareBusy = data.prepare_status === 'running';
+      if (data.status !== 'publishing' && data.cover_status !== 'generating' && !mirrorBusy && !prepareBusy) {
         clearInterval(montagePollTimer);
         montagePollTimer = null;
         montageActive = false;
+      } else {
+        montageActive = true;
       }
       document.getElementById('montageResultsCard').classList.add('active');
       const info = document.getElementById('montageResultInfo');
@@ -4474,7 +4588,12 @@ async function publishMontage() {
     const res = await fetch(`/api/montage/${montageJobId}/publish`, { method: 'POST', body: form, signal: controller.signal });
     const data = await res.json();
     if (!res.ok) {
-      publishWindowError(data.detail || 'Ошибка публикации');
+      if (res.status === 409 && Array.isArray(data.prepare_targets) && data.prepare_targets.length) {
+        publishWindowError(data.detail || 'Видео ещё не подготовлено к публикации. Запустите подготовку.');
+        preparePublishTargets();
+      } else {
+        publishWindowError(data.detail || 'Ошибка публикации');
+      }
       document.getElementById('montagePublishBtn').disabled = false;
       document.getElementById('montagePublishBtn').textContent = 'Начать публикацию';
       return;
@@ -4501,6 +4620,7 @@ function openPublishWindow() {
   updatePublishCounts();
   renderCoverState(window.__coverState || {});
   applyMirrorVariantState(window.__opsState || {});
+  applyPrepareState(window.__opsState || {});
   const video = document.getElementById('montageVideo');
   const slider = document.getElementById('montageCoverTime');
   slider.max = String(Math.max(0.1, Number(video.duration) || 1));

@@ -998,6 +998,7 @@ def _publish_targets(
     progress_cb: Callable[[float, str, str], None],
     log_cb: Callable[[str], None],
     step_cb: Callable[[str, str, str, str], None] | None = None,
+    prepared_targets: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     load_secrets_env()
     sw = get_software_defaults()
@@ -1018,7 +1019,16 @@ def _publish_targets(
         base = index * 100 / max(1, len(targets))
         span = 100 / max(1, len(targets))
         result_key = str(target.get("id") or kind)
-        target_source = mirrored_source_video if bool(target.get("mirrored")) else source_video
+        prepared = None
+        if prepared_targets is not None:
+            prepared = prepared_targets.get(result_key) or {}
+        if prepared is not None:
+            # Publishing only uses the file that the preparation stage produced;
+            # it never transcodes/normalises/mirrors here (spec: publish = send).
+            candidate = prepared.get("video_path")
+            target_source = Path(str(candidate)) if candidate else None
+        else:
+            target_source = mirrored_source_video if bool(target.get("mirrored")) else source_video
         if target_source is None or not Path(target_source).exists():
             preparation_error = str(target.get("preparation_error") or "").strip()
             emit_step("file", "Проверка готового файла", "failed",
@@ -1049,12 +1059,8 @@ def _publish_targets(
                 workdir / "publish.log", log_cb,
             )
             variant = "trial" if kind == "trial" else "normal"
-            emit_step("prepare", "Подготовка файла к загрузке", "running")
-            staged = instagram.prepare_variant(
-                target_source, workdir / "staging", job_id, variant,
-                lambda p, d: sub_progress(p * 0.2, d),
-            )
-            emit_step("prepare", "Подготовка файла к загрузке", "completed")
+            staged = Path(target_source)
+            emit_step("prepare", "Проверка готового файла", "completed", Path(staged).name)
             graph_ip, raw_ip = instagram.resolve_hosts()
             emit_step("upload", "Загрузка видео", "running")
             sub_progress(25, "Загрузка в GitHub Raw...")
@@ -1063,10 +1069,10 @@ def _publish_targets(
             instagram.verify_public_video(raw_url, raw_ip, lambda p, d: sub_progress(25 + p * 0.2, d))
             emit_step("upload", "Загрузка видео", "completed")
             cover_url = ""
-            cover_path = Path(str(target.get("cover_path") or ""))
-            if cover_path.is_file():
+            prepared_cover = (prepared or {}).get("cover_path")
+            if prepared_cover and Path(str(prepared_cover)).is_file():
                 sub_progress(44, "Загрузка обложки в GitHub Raw...")
-                _, cover_url = instagram.upload_cover_to_github(cover_path)
+                _, cover_url = instagram.upload_cover_file(Path(str(prepared_cover)))
                 time.sleep(3)
             caption = str(target.get("caption") or target.get("text") or "")
             emit_step("processing", "Обработка на стороне площадки", "running")
@@ -1129,21 +1135,13 @@ def _publish_targets(
             youtube = YouTubePublisher(INSTAPOSTER_DIR, Path(sys.executable), workdir / "youtube.log")
             youtube.check_auth()
             emit_step("auth", "Проверка авторизации", "completed")
-            youtube_source = workdir / "youtube_staging" / f"{result_key}.mp4"
-            emit_step("prepare", "Подготовка файла к загрузке", "running")
-            youtube.prepare_video(
-                target_source,
-                youtube_source,
-                lambda p, detail: sub_progress(p * 0.25, detail),
-            )
-            emit_step("prepare", "Подготовка файла к загрузке", "completed")
+            youtube_source = Path(target_source)
+            emit_step("prepare", "Проверка готового файла", "completed", Path(youtube_source).name)
             title = str(target.get("title") or target.get("text") or "Мой ролик")
             thumbnail_path = None
-            cover_path = Path(str(target.get("cover_path") or ""))
-            if cover_path.is_file():
-                thumbnail_path = youtube.prepare_thumbnail(
-                    cover_path, workdir / "youtube_staging" / f"{result_key}_thumbnail.jpg"
-                )
+            prepared_thumbnail = (prepared or {}).get("thumbnail_path")
+            if prepared_thumbnail and Path(str(prepared_thumbnail)).is_file():
+                thumbnail_path = Path(str(prepared_thumbnail))
             upload_ready_called: list[bool] = [False]
             def upload_ready() -> None:
                 upload_ready_called[0] = True
@@ -1171,10 +1169,9 @@ def _publish_targets(
                 INSTAPOSTER_DIR, shutil.which("ffmpeg") or "ffmpeg",
                 workdir / "publish.log", log_cb,
             )
-            emit_step("prepare", "Подготовка файла к загрузке", "running")
-            sub_progress(10, "Подготовка видео для GitHub...")
-            staged = instagram.prepare_variant(target_source, workdir / "staging", job_id, "threads", lambda p, d: sub_progress(p, d))
-            emit_step("prepare", "Подготовка файла к загрузке", "completed")
+            staged = Path(target_source)
+            sub_progress(10, "Проверка готового файла...")
+            emit_step("prepare", "Проверка готового файла", "completed", Path(staged).name)
             graph_ip = threads_mod.resolve_host_via_doh(threads_mod.THREADS_HOST)
             raw_ip = threads_mod.resolve_host_via_doh(threads_mod.RAW_HOST)
             emit_step("upload", "Загрузка видео", "running")
@@ -1216,16 +1213,9 @@ def _publish_targets(
                 emit_step("auth", "Проверка авторизации", "failed", "Не настроен доступ к Telegram")
                 raise RuntimeError("Telegram: не настроен TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID")
             emit_step("auth", "Проверка авторизации", "completed")
-            duration = 0.0
-            try:
-                duration = float(ffprobe(target_source).get("format", {}).get("duration") or 0) or 30.0
-            except Exception:
-                duration = 30.0
-            tg_file = workdir / f"{job_id}_tg.mp4"
-            emit_step("prepare", "Подготовка файла к загрузке", "running")
-            sub_progress(15, "Подготовка файла до 45 MB для Telegram...")
-            _transcode_to_fit(target_source, tg_file, 45 * 1024 * 1024, duration, sub_progress)
-            emit_step("prepare", "Подготовка файла к загрузке", "completed")
+            tg_file = Path(target_source)
+            sub_progress(15, "Проверка готового файла...")
+            emit_step("prepare", "Проверка готового файла", "completed", Path(tg_file).name)
             caption = str(target.get("caption") or target.get("text") or "")
             curl = shutil.which("curl") or "curl"
             cmd = [curl, "-sS", "-X", "POST",
@@ -1272,6 +1262,7 @@ def publish_job(
     target_progress_cb: Callable[[str, float, str, str], None] | None = None,
     confirmed_cb: Callable[[str, dict[str, Any]], None] | None = None,
     target_step_cb: Callable[[str, str, str, str, str], None] | None = None,
+    prepared_targets: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     instagram_priority = {("trial", False): 0, ("trial", True): 1, ("instagram", False): 2, ("instagram", True): 3}
     instagram_targets = sorted(
@@ -1329,6 +1320,7 @@ def publish_job(
                     progress_cb=target_progress,
                     log_cb=log_cb,
                     step_cb=target_step,
+                    prepared_targets=prepared_targets,
                 )
                 lane_results.update(result["results"])
                 if confirmed_cb:
