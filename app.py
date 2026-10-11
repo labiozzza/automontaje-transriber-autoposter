@@ -55,6 +55,27 @@ diarization_pipeline = None
 PROJECTS = {}
 PROJECTS_LOCK = asyncio.Lock()
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".3gp", ".ts"}
+TRANSCRIPTION_STATE_DIR = BASE_DIR / "transcription_jobs"
+TRANSCRIPTION_STATE_DIR.mkdir(exist_ok=True)
+PROJECTS_PATH = BASE_DIR / "projects.json"
+
+
+def _write_json_atomic(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _save_transcription_job(job_id: str) -> None:
+    job = jobs.get(job_id)
+    if not isinstance(job, dict) or job.get("kind") == "montage":
+        return
+    _write_json_atomic(TRANSCRIPTION_STATE_DIR / f"{job_id}.json", job)
+
+
+def _save_projects() -> None:
+    _write_json_atomic(PROJECTS_PATH, {"projects": list(PROJECTS.values())})
 
 
 def _file_sha256(path: str) -> str:
@@ -313,6 +334,7 @@ async def process_job(job_id: str, params: dict):
                 job["status"] = "error"
                 job["error"] = "Ошибка конвертации файла"
                 await broadcast_progress(job_id, 0, "error", "Ошибка конвертации")
+                _save_transcription_job(job_id)
                 return
 
         await broadcast_progress(job_id, 15, "conversion", "Конвертация завершена")
@@ -401,6 +423,7 @@ async def process_job(job_id: str, params: dict):
         job["progress"] = 100
 
         await broadcast_progress(job_id, 100, "done", "Готово!")
+        _save_transcription_job(job_id)
         if await register_video_project(job_id):
             await broadcast_progress(job_id, 100, "done",
                                      "Готово! Ролик добавлен в проекты (Автомонтаж).")
@@ -411,6 +434,7 @@ async def process_job(job_id: str, params: dict):
         job["error"] = str(e)
         job["traceback"] = traceback.format_exc()
         await broadcast_progress(job_id, 0, "error", str(e))
+        _save_transcription_job(job_id)
 
 
 def merge_results(segments, diarization, mode):
@@ -616,6 +640,7 @@ async def upload_file(file: UploadFile = File(...)):
         "error": None,
         "created_at": datetime.now().isoformat(),
     }
+    _save_transcription_job(job_id)
 
     return {"job_id": job_id, "filename": file.filename}
 
@@ -641,6 +666,7 @@ async def register_video_project(job_id: str) -> Optional[str]:
             "status": "ready",
             "created_at": job.get("created_at"),
         }
+        _save_projects()
     return pid
 
 
@@ -779,6 +805,7 @@ async def delete_project(project_id: str):
     async with PROJECTS_LOCK:
         if project_id in PROJECTS:
             del PROJECTS[project_id]
+            _save_projects()
     return {"ok": True}
 
 
@@ -802,6 +829,8 @@ async def start_transcription(
         "num_speakers": num_speakers,
     }
     jobs[job_id]["params"] = params
+    jobs[job_id]["status"] = "processing"
+    _save_transcription_job(job_id)
 
     asyncio.create_task(process_job(job_id, params))
     return {"job_id": job_id, "status": "processing"}
@@ -863,6 +892,7 @@ async def save_result(job_id: str, request: Request):
         for segment, text in zip(job["result"], normalized)
     ]
     job["transcript_updated_at"] = datetime.now().isoformat()
+    _save_transcription_job(job_id)
     return {"segments": job["result"], "saved": True}
 
 
@@ -969,6 +999,112 @@ def _recover_drawing_jobs() -> None:
             except Exception:
                 continue
         _drawing_generation_jobs[str(job["id"])] = job
+
+
+def _uploaded_video(job_id: str) -> Optional[Path]:
+    candidates = [
+        path for path in UPLOAD_DIR.glob(f"{job_id}.*")
+        if path.is_file() and path.suffix.lower() in VIDEO_EXTS
+    ]
+    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+
+
+def _recover_transcription_projects() -> None:
+    """Загружает постоянный каталог и один раз импортирует старые файлы."""
+    for path in sorted(TRANSCRIPTION_STATE_DIR.glob("*.json")):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(job, dict) or not job.get("id"):
+            continue
+        if job.get("status") == "processing":
+            job["status"] = "error"
+            job["error"] = "Транскрибация была прервана перезапуском сервера"
+            job["stage"] = "error"
+            job["detail"] = job["error"]
+            _write_json_atomic(path, job)
+        jobs[str(job["id"])] = job
+
+    montage_sources: dict[str, dict[str, Any]] = {}
+    for path in sorted(MONTAGE_WORK.glob("*/job_state.json"), key=lambda item: item.stat().st_mtime):
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        transcript_id = str(state.get("transcript_job_id") or "")
+        if transcript_id and state.get("srt_text"):
+            montage_sources[transcript_id] = state
+
+    recovered_projects: dict[str, dict[str, Any]] = {}
+    video_paths = sorted(
+        (path for path in UPLOAD_DIR.iterdir() if path.is_file() and path.suffix.lower() in VIDEO_EXTS),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for video_path in video_paths:
+        job_id = video_path.stem
+        state = montage_sources.get(job_id, {})
+        job = jobs.get(job_id)
+        if not isinstance(job, dict):
+            segments: list[dict[str, Any]] = []
+            srt_text = str(state.get("srt_text") or "")
+            output_srt = OUTPUT_DIR / f"{job_id}.srt"
+            output_json = OUTPUT_DIR / f"{job_id}.json"
+            if not srt_text and output_srt.is_file():
+                srt_text = output_srt.read_text(encoding="utf-8", errors="replace")
+            if srt_text:
+                segments = drawing_generator.parse_srt_segments(srt_text)
+            elif output_json.is_file():
+                try:
+                    value = json.loads(output_json.read_text(encoding="utf-8"))
+                    if isinstance(value, list):
+                        segments = value
+                except Exception:
+                    pass
+            created_at = datetime.fromtimestamp(video_path.stat().st_mtime).isoformat()
+            original_name = str(state.get("original_name") or video_path.name)
+            wav_path = UPLOAD_DIR / f"{job_id}.wav"
+            job = {
+                "id": job_id,
+                "original_name": original_name,
+                "wav_path": str(wav_path if wav_path.is_file() else video_path),
+                "upload_path": str(video_path.resolve()),
+                "status": "done" if segments else "uploaded",
+                "progress": 100 if segments else 0,
+                "stage": "done" if segments else "",
+                "detail": "Восстановлено с диска" if segments else "Транскрипция не найдена",
+                "result": segments or None,
+                "error": None,
+                "created_at": created_at,
+                "recovered": True,
+            }
+            jobs[job_id] = job
+            _save_transcription_job(job_id)
+        recovered_projects[f"p_{job_id}"] = {
+            "id": f"p_{job_id}",
+            "name": str(job.get("original_name") or video_path.name),
+            "video_path": str(video_path.resolve()),
+            "transcript_job_id": job_id,
+            "status": "ready" if job.get("status") == "done" else "transcript_missing",
+            "created_at": job.get("created_at") or datetime.fromtimestamp(video_path.stat().st_mtime).isoformat(),
+            "recovered": True,
+        }
+
+    catalog_exists = PROJECTS_PATH.is_file()
+    if catalog_exists:
+        try:
+            payload = json.loads(PROJECTS_PATH.read_text(encoding="utf-8"))
+            stored = payload.get("projects") if isinstance(payload, dict) else None
+            if isinstance(stored, list):
+                for project in stored:
+                    if isinstance(project, dict) and project.get("id"):
+                        PROJECTS[str(project["id"])] = project
+        except Exception:
+            catalog_exists = False
+    if not catalog_exists:
+        PROJECTS.update(recovered_projects)
+        _save_projects()
 
 app.mount("/animation-assets", StaticFiles(directory=str(montage_engine.ANIMATIONS_DIR)), name="animation-assets")
 app.mount("/font-assets", StaticFiles(directory=str(montage_engine.FONTS_DIR)), name="font-assets")
@@ -1273,6 +1409,7 @@ def _recover_montage_jobs() -> None:
 
 _recover_montage_jobs()
 _recover_drawing_jobs()
+_recover_transcription_projects()
 
 
 def _threaded_progress(loop, job_id):
@@ -1402,6 +1539,7 @@ async def _store_project_covers(job_id: str) -> None:
             if project_id and project_id in PROJECTS:
                 PROJECTS[project_id]["covers"] = list(job.get("covers") or [])
                 PROJECTS[project_id]["covers_dir"] = str(MONTAGE_WORK / job_id / "covers")
+        _save_projects()
 
 
 async def process_cover_suggestions(job_id: str) -> None:
@@ -1789,6 +1927,12 @@ async def generate_montage_drawings(request: Request):
         "error": "",
         "drawings": [],
         "created_at": datetime.utcnow().isoformat(),
+        "created_at_epoch": time.time(),
+        "attempt": 0,
+        "attempts_total": 2,
+        "attempt_timeout_seconds": 240,
+        "last_event": "Задание создано",
+        "events": [],
     }
     _drawing_generation_jobs[job_id] = job
     for old_id in [
@@ -1802,8 +1946,34 @@ async def generate_montage_drawings(request: Request):
         job.update(fields)
         _save_drawing_job(job_id)
 
+    def _generation_progress(event: dict[str, Any]) -> None:
+        event_name = str(event.get("event") or "")
+        event_at = float(event.get("event_at") or time.time())
+        detail = str(event.get("detail") or "BigPickle работает")
+        history = list(job.get("events") or [])
+        history.append({"event": event_name, "at": event_at, "detail": detail})
+        fields: dict[str, Any] = {
+            "phase": detail,
+            "last_event": detail,
+            "events": history[-12:],
+            "attempt": int(event.get("attempt") or 0),
+            "attempts_total": int(event.get("attempts_total") or 2),
+            "attempt_timeout_seconds": float(event.get("attempt_timeout_seconds") or 240),
+            "indeterminate": False,
+        }
+        if event_name == "attempt_started":
+            fields["attempt_started_at"] = event_at
+        if event_name in {"response_received", "response_parsed"}:
+            fields["progress"] = 90
+        _job_update(**fields)
+
     try:
-        _job_update(phase="BigPickle выбирает моменты и рисует схемы", progress=None, indeterminate=True)
+        _job_update(
+            phase="Ожидание свободного слота BigPickle",
+            last_event="Задание ожидает запуска модели",
+            progress=10,
+            indeterminate=False,
+        )
         if mode == "auto":
             async with _drawing_generation_lock:
                 drawings = await asyncio.to_thread(
@@ -1811,6 +1981,7 @@ async def generate_montage_drawings(request: Request):
                     transcript,
                     source_segments or [],
                     3,
+                    _generation_progress,
                 )
         else:
             async with _drawing_generation_lock:
@@ -1818,6 +1989,7 @@ async def generate_montage_drawings(request: Request):
                     drawing_generator.generate_drawings,
                     transcript,
                     selected_fragments,
+                    _generation_progress,
                 )
         _job_update(phase="Проверка и сохранение схем", progress=90, indeterminate=False)
         if not drawings:
@@ -2146,6 +2318,7 @@ async def start_montage(
                     "covers": list(jobs[job_id].get("covers") or []),
                     "covers_dir": str(MONTAGE_WORK / job_id / "covers"),
                 }
+                _save_projects()
     asyncio.create_task(process_montage(job_id, params))
     if propose_cover:
         asyncio.create_task(process_cover_suggestions(job_id))

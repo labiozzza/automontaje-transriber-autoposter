@@ -1,6 +1,9 @@
 import json
 import shutil
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -15,6 +18,7 @@ from montage.drawing_generator import (
     validate_drawing_overlay,
 )
 from montage import drawing_generator as app_chart
+from montage import opencode_client
 from montage.apply_timeline_animation import render_drawing
 import app
 
@@ -349,7 +353,10 @@ class DrawingRevisionTests(unittest.TestCase):
 class DrawingGenerationJobTests(unittest.TestCase):
     """Режим авто-подбора: без выбранных фрагментов, честный статус, восстановление."""
 
-    JOB_IDS = ("dj-test-auto-mode", "dj-test-smart-err", "dj-test-status-job", "dj-test-recover")
+    JOB_IDS = (
+        "dj-test-auto-mode", "dj-test-smart-live", "dj-test-smart-err",
+        "dj-test-status-job", "dj-test-recover",
+    )
 
     def tearDown(self):
         for job_id in self.JOB_IDS:
@@ -397,6 +404,34 @@ class DrawingGenerationJobTests(unittest.TestCase):
             __import__("asyncio").run(app.generate_montage_drawings(self._request(payload)))
         self.assertEqual(raised.exception.status_code, 400)
 
+    def test_live_bigpickle_events_are_saved_in_job(self):
+        payload = {
+            "mode": "auto",
+            "job_id": "dj-test-smart-live",
+            "srt_text": "1\n00:00:00,000 --> 00:00:04,000\nПроцесс.\n",
+            "selected_fragments": [],
+        }
+
+        def generate(_transcript, _segments, _count, progress):
+            progress({
+                "event": "attempt_started", "attempt": 1, "attempts_total": 2,
+                "attempt_timeout_seconds": 240, "event_at": 1000.0,
+                "detail": "Запрос отправлен BigPickle",
+            })
+            progress({
+                "event": "response_received", "attempt": 1, "attempts_total": 2,
+                "attempt_timeout_seconds": 240, "event_at": 1001.0,
+                "detail": "Ответ получен",
+            })
+            return [self._proposal()]
+
+        with mock.patch.object(app.drawing_generator, "generate_smart_drawings", side_effect=generate):
+            __import__("asyncio").run(app.generate_montage_drawings(self._request(payload)))
+        job = app._drawing_generation_jobs["dj-test-smart-live"]
+        self.assertEqual(job["attempt"], 1)
+        self.assertEqual(job["attempt_started_at"], 1000.0)
+        self.assertEqual([event["event"] for event in job["events"]], ["attempt_started", "response_received"])
+
     def test_status_endpoint_returns_saved_job(self):
         app._drawing_generation_jobs["dj-test-status-job"] = {
             "id": "dj-test-status-job", "status": "done", "progress": 100, "drawings": [],
@@ -430,6 +465,49 @@ class DrawingGenerationJobTests(unittest.TestCase):
         job = app._drawing_generation_jobs["dj-test-recover"]
         self.assertEqual(job["status"], "error")
         self.assertIn("перезапуском", job["error"])
+
+
+class ProjectPersistenceTests(unittest.TestCase):
+    def test_recovers_old_video_and_transcript_across_restart(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            uploads = root / "uploads"
+            outputs = root / "outputs"
+            montage = root / "montage_work"
+            states = root / "transcription_jobs"
+            for directory in (uploads, outputs, montage, states):
+                directory.mkdir()
+            video = uploads / "abc12345.MOV"
+            video.write_bytes(b"video")
+            workdir = montage / "montage01"
+            workdir.mkdir()
+            (workdir / "job_state.json").write_text(json.dumps({
+                "transcript_job_id": "abc12345",
+                "original_name": "Original.MOV",
+                "srt_text": "1\n00:00:00,000 --> 00:00:02,000\nТестовая фраза.\n",
+            }), encoding="utf-8")
+            projects_path = root / "projects.json"
+            patches = (
+                mock.patch.object(app, "UPLOAD_DIR", uploads),
+                mock.patch.object(app, "OUTPUT_DIR", outputs),
+                mock.patch.object(app, "MONTAGE_WORK", montage),
+                mock.patch.object(app, "TRANSCRIPTION_STATE_DIR", states),
+                mock.patch.object(app, "PROJECTS_PATH", projects_path),
+                mock.patch.dict(app.jobs, {}, clear=True),
+                mock.patch.dict(app.PROJECTS, {}, clear=True),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                app._recover_transcription_projects()
+                self.assertEqual(app.jobs["abc12345"]["status"], "done")
+                self.assertEqual(app.jobs["abc12345"]["result"][0]["text"], "Тестовая фраза.")
+                self.assertEqual(app.PROJECTS["p_abc12345"]["name"], "Original.MOV")
+                self.assertTrue(projects_path.is_file())
+
+                app.jobs.clear()
+                app.PROJECTS.clear()
+                app._recover_transcription_projects()
+                self.assertEqual(app.jobs["abc12345"]["status"], "done")
+                self.assertIn("p_abc12345", app.PROJECTS)
 
 
 class SmartDrawingSelectionTests(unittest.TestCase):
@@ -490,6 +568,24 @@ class SmartDrawingSelectionTests(unittest.TestCase):
         self.assertEqual(len(drawings), 1)
         self.assertIn("ФРАЗЫ", ask.call_args.args[0])
         self.assertIn("Фраза.", ask.call_args.args[0])
+
+
+class OpenCodeProgressTests(unittest.TestCase):
+    def test_reports_timeout_retry_and_success(self):
+        events = []
+        completed = SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
+        timeout = subprocess.TimeoutExpired(cmd="opencode", timeout=1)
+        with mock.patch.object(opencode_client.subprocess, "run", side_effect=[timeout, completed]), \
+                mock.patch.object(opencode_client.time, "sleep"):
+            result = opencode_client.ask_json(
+                "prompt", timeout=1, retries=1, progress_callback=events.append,
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual([event["event"] for event in events], [
+            "attempt_started", "attempt_timeout", "retry_scheduled",
+            "attempt_started", "response_received", "response_parsed",
+        ])
+        self.assertEqual(events[-1]["attempt"], 2)
 
 
 if __name__ == "__main__":

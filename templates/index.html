@@ -700,6 +700,7 @@ select option { background: var(--surface2); }
 @keyframes drawingProgressSlide { 0% { transform:translateX(-110%); } 100% { transform:translateX(260%); } }
 #drawingGenerationStatus.error { color:#ff8f8f; }
 .drawing-generation-progress-meta { display:flex; justify-content:space-between; margin-top:5px; color:var(--text2); font-size:11px; }
+.drawing-generation-progress-detail { margin-top:5px; color:var(--text2); font-size:11px; line-height:1.4; font-variant-numeric:tabular-nums; }
 .drawing-proposals { display:none; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; margin:10px 0 14px; }
 .drawing-proposals.active { display:grid; }
 .drawing-proposal { padding:10px; border:1px solid var(--border); border-radius:10px; background:var(--surface2); }
@@ -1087,6 +1088,7 @@ select option { background: var(--surface2); }
         <div class="drawing-generation-progress" id="drawingGenerationProgress">
           <div class="drawing-generation-progress-track"><div class="drawing-generation-progress-bar" id="drawingGenerationProgressBar"></div></div>
           <div class="drawing-generation-progress-meta"><span id="drawingGenerationProgressLabel">Подготовка</span><span id="drawingGenerationProgressPercent">0%</span></div>
+          <div class="drawing-generation-progress-detail" id="drawingGenerationProgressDetail"></div>
         </div>
         <div class="drawing-proposals" id="drawingProposals"></div>
         <div class="overlay-inspector" id="overlayInspector">
@@ -2453,6 +2455,37 @@ let drawingJobPollTimer = null;
 let drawingJobAppliedId = null;
 let drawingJobStartedAt = 0;
 let drawingJobPollMisses = 0;
+let drawingJobLastStatus = null;
+
+function formatDrawingJobTime(seconds) {
+  const value = Math.max(0, Math.ceil(Number(seconds) || 0));
+  const minutes = Math.floor(value / 60);
+  return `${minutes}:${String(value % 60).padStart(2, '0')}`;
+}
+
+function drawingJobDetail(job) {
+  const now = Date.now() / 1000;
+  const created = Number(job.created_at_epoch) || drawingJobStartedAt / 1000;
+  const elapsed = Math.max(0, now - created);
+  const attempt = Number(job.attempt) || 0;
+  const total = Number(job.attempts_total) || 2;
+  const timeout = Number(job.attempt_timeout_seconds) || 240;
+  const attemptStarted = Number(job.attempt_started_at) || 0;
+  if (!attempt || !attemptStarted) {
+    return {percent: 10, text: `Прошло ${formatDrawingJobTime(elapsed)} · ожидаем свободный слот для модели`};
+  }
+  const attemptElapsed = Math.max(0, now - attemptStarted);
+  const attemptRemaining = Math.max(0, timeout - attemptElapsed);
+  const maximumRemaining = Math.max(0, attemptRemaining + (total - attempt) * timeout);
+  const consumedBudget = Math.min(total * timeout, (attempt - 1) * timeout + attemptElapsed);
+  const percent = 10 + 75 * consumedBudget / (total * timeout);
+  const timedOut = (job.events || []).some(item => item.event === 'attempt_timeout');
+  const retryNote = timedOut && attempt > 1 ? ' · предыдущая попытка превысила лимит' : '';
+  return {
+    percent,
+    text: `Прошло ${formatDrawingJobTime(elapsed)} · попытка ${attempt} из ${total} · до таймаута ${formatDrawingJobTime(attemptRemaining)} · результат или ошибка максимум через ${formatDrawingJobTime(maximumRemaining)}${retryNote}`,
+  };
+}
 
 async function fetchDrawingJob(jobId) {
   try {
@@ -2469,6 +2502,7 @@ function stopDrawingJobPoll() {
     clearInterval(drawingJobPollTimer);
     drawingJobPollTimer = null;
   }
+  drawingJobLastStatus = null;
 }
 
 async function finishDrawingJob(jobId, drawings) {
@@ -2477,6 +2511,7 @@ async function finishDrawingJob(jobId, drawings) {
   if (localStorage.getItem('drawingGenJobId') === jobId) localStorage.removeItem('drawingGenJobId');
   stopDrawingJobPoll();
   updateDrawingGenerationProgress(100, 'Готово');
+  document.getElementById('drawingGenerationProgressDetail').textContent = '';
   proposalReviseText = [];
   proposalRevising.clear();
   pendingRevisionHistory.clear();
@@ -2493,6 +2528,7 @@ function finishDrawingJobError(job) {
   if (localStorage.getItem('drawingGenJobId') === job.id) localStorage.removeItem('drawingGenJobId');
   stopDrawingJobPoll();
   updateDrawingGenerationProgress(100, 'Ошибка генерации');
+  document.getElementById('drawingGenerationProgressDetail').textContent = job.last_event || '';
   drawingGenerationMessage(`Ошибка BigPickle: ${job.error || 'неизвестная ошибка'}`, true);
   document.getElementById('generateDrawingsBtn').disabled = false;
 }
@@ -2507,12 +2543,12 @@ function applyDrawingJobStatus(job) {
     finishDrawingJobError(job);
     return;
   }
-  const elapsed = Math.max(1, Math.round((Date.now() - drawingJobStartedAt) / 1000));
-  if (job.indeterminate) {
-    updateDrawingGenerationProgress(null, `${job.phase || 'BigPickle работает'} · ${elapsed} с`);
-  } else {
-    updateDrawingGenerationProgress(Number(job.progress) || 0, job.phase || 'Подготовка');
-  }
+  drawingJobLastStatus = job;
+  const live = drawingJobDetail(job);
+  const received = (job.events || []).some(item => item.event === 'response_received');
+  const percent = received ? 90 : live.percent;
+  updateDrawingGenerationProgress(percent, job.phase || 'Подготовка');
+  document.getElementById('drawingGenerationProgressDetail').textContent = live.text;
 }
 
 function startDrawingJobPoll(jobId) {
@@ -2522,10 +2558,13 @@ function startDrawingJobPoll(jobId) {
     const job = await fetchDrawingJob(jobId);
     if (!job) {
       drawingJobPollMisses += 1;
-      if (drawingJobPollMisses >= 5) stopDrawingJobPoll();
+      if (drawingJobPollMisses >= 3) {
+        drawingGenerationMessage('Нет связи со статусом генерации. Сервер продолжает работу; пытаемся подключиться снова…', true);
+      }
       return;
     }
     drawingJobPollMisses = 0;
+    drawingGenerationMessage(job.last_event || job.phase || 'BigPickle работает');
     applyDrawingJobStatus(job);
   }, 900);
 }

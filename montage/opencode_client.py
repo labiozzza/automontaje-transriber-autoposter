@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 
 class OpenCodeError(RuntimeError):
@@ -49,7 +49,14 @@ def _json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def ask_json(prompt: str, *, model: str | None = None, timeout: float = 240, retries: int = 1) -> dict[str, Any]:
+def ask_json(
+    prompt: str,
+    *,
+    model: Optional[str] = None,
+    timeout: float = 240,
+    retries: int = 1,
+    progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> dict[str, Any]:
     if len(prompt) > 60_000:
         raise OpenCodeError("Запрос к GPT слишком большой")
     executable = os.environ.get("OPENCODE_BIN") or "opencode"
@@ -64,8 +71,27 @@ def ask_json(prompt: str, *, model: str | None = None, timeout: float = 240, ret
         }
     }
     error = "GPT не вернул результат"
-    for attempt in range(max(0, retries) + 1):
+    attempts_total = max(0, retries) + 1
+
+    def report(event: str, attempt: int, detail: str) -> None:
+        if not progress_callback:
+            return
         try:
+            progress_callback({
+                "event": event,
+                "attempt": attempt,
+                "attempts_total": attempts_total,
+                "attempt_timeout_seconds": timeout,
+                "event_at": time.time(),
+                "detail": detail,
+            })
+        except Exception:
+            pass
+
+    for attempt_index in range(attempts_total):
+        attempt = attempt_index + 1
+        try:
+            report("attempt_started", attempt, f"Запрос отправлен BigPickle, ожидаем ответ (попытка {attempt} из {attempts_total})")
             with tempfile.TemporaryDirectory(prefix="montage-drawing-") as temporary:
                 Path(temporary, "opencode.json").write_text(json.dumps({
                     "$schema": "https://opencode.ai/config.json",
@@ -87,16 +113,23 @@ def ask_json(prompt: str, *, model: str | None = None, timeout: float = 240, ret
                 detail = result.stderr.strip()[-500:]
                 if detail:
                     error += f": {detail}"
+                report("attempt_failed", attempt, error)
             else:
+                report("response_received", attempt, "Ответ BigPickle получен, проверяем JSON")
                 raw = result.stdout[:2_000_000]
                 parsed = _json_object(_assistant_text(raw)) or _json_object(raw)
                 if parsed is not None:
+                    report("response_parsed", attempt, "Ответ разобран, проверяем и сохраняем схемы")
                     return parsed
                 error = "GPT вернул некорректный JSON"
+                report("attempt_failed", attempt, error)
         except subprocess.TimeoutExpired:
             error = "GPT не ответил вовремя"
+            report("attempt_timeout", attempt, f"Попытка {attempt} превысила лимит {int(timeout)} с")
         except OSError as exc:
             error = f"Не удалось запустить OpenCode: {exc}"
-        if attempt < retries:
-            time.sleep(0.5 * (attempt + 1))
+            report("attempt_failed", attempt, error)
+        if attempt < attempts_total:
+            report("retry_scheduled", attempt, f"Запускаем повторную попытку {attempt + 1} из {attempts_total}")
+            time.sleep(0.5 * attempt)
     raise OpenCodeError(error)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from typing import Any
+from typing import Any, Callable, Optional
 
 from .opencode_client import ask_json
 
@@ -193,7 +193,11 @@ def validate_drawing_overlay(raw: Any, index: int = 0) -> dict[str, Any]:
     }
 
 
-def generate_drawings(transcript: str, selected_fragments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def generate_drawings(
+    transcript: str,
+    selected_fragments: list[dict[str, Any]],
+    progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> list[dict[str, Any]]:
     transcript = transcript.strip()
     if not transcript:
         raise ValueError("Транскрипция пуста")
@@ -285,7 +289,7 @@ def generate_drawings(transcript: str, selected_fragments: list[dict[str, Any]])
             + "\n\nFULL_TRANSCRIPT_CONTEXT:\n"
             + context
         )
-    response = ask_json(prompt, model="opencode/big-pickle")
+    response = ask_json(prompt, model="opencode/big-pickle", progress_callback=progress_callback)
     raw_drawings = response.get("drawings")
     if not isinstance(raw_drawings, list):
         raise ValueError("BigPickle не вернул список рисунков")
@@ -362,7 +366,12 @@ def parse_srt_segments(text: str) -> list[dict[str, Any]]:
     return segments
 
 
-def generate_smart_drawings(transcript: str, segments: list[dict[str, Any]], max_drawings: int = 3) -> list[dict[str, Any]]:
+def generate_smart_drawings(
+    transcript: str,
+    segments: list[dict[str, Any]],
+    max_drawings: int = 3,
+    progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> list[dict[str, Any]]:
     transcript = transcript.strip()
     if not transcript:
         raise ValueError("Транскрипция пуста")
@@ -389,7 +398,7 @@ def generate_smart_drawings(transcript: str, segments: list[dict[str, Any]], max
         '"paths":[{"points":[[100,200],[200,150]],"stroke":"#FFFFFF","stroke_width":10}]}]}\n\n'
         "ФРАЗЫ:\n" + json.dumps(context_phrases, ensure_ascii=False) + "\n\nТРАНСКРИПЦИЯ (контекст):\n" + transcript[:20000]
     )
-    response = ask_json(prompt, model="opencode/big-pickle")
+    response = ask_json(prompt, model="opencode/big-pickle", progress_callback=progress_callback)
     suggestions = response.get("suggestions")
     if not isinstance(suggestions, list):
         raise ValueError("BigPickle не вернул предложения")

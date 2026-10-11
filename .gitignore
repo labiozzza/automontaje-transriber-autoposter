@@ -4,6 +4,8 @@ montage_work/
 *.pyc
 .DS_Store
 uploads/
+projects.json
+transcription_jobs/
 montage_work/
 central_work/
 instagram-media/
