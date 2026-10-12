@@ -1237,7 +1237,10 @@ def _cleanup_allowed_paths(job_id: str, job: dict, phase: str, candidates: list[
 
 
 def _cleanup_render_artifacts(job_id: str, job: dict) -> dict:
-    if job.get("status") != "done" or not job.get("result"):
+    # The unified pipeline keeps ``status`` at ``processing`` while the optional
+    # mirror / preparation phases run, so render artefacts are cleaned up as soon
+    # as the main result exists (status ``processing`` or ``done``).
+    if job.get("status") not in ("processing", "done") or not job.get("result"):
         return {"phase": "render", "removed": [], "protected": [], "errors": []}
     try:
         workdir = _safe_montage_workdir(job_id)
@@ -1268,7 +1271,6 @@ def _cleanup_publish_artifacts(job_id: str, job: dict) -> dict:
             (workdir / "publish_mirrored", True),
             (workdir / "staging", True),
             (workdir / "youtube_staging", True),
-            (workdir / _PUBLISH_PREP_DIR, True),
             (workdir / f"{job_id}_tg.mp4", False),
         ]
         return _cleanup_allowed_paths(job_id, job, "publish", candidates)
@@ -1711,12 +1713,21 @@ def _validate_prepared_video(path) -> dict:
 
 
 def _preparation_error_message(target: dict) -> str:
+    """Human-readable reason a publish target is not locally ready (spec 7)."""
+    label = target.get("label") or target.get("id") or ""
     mirrored = bool(target.get("mirrored"))
-    suffix = " (перевёрнутое)" if mirrored else ""
-    return (
-        f"Видео для цели «{target.get('label') or target.get('id')}»{suffix} не подготовлено. "
-        "Нажмите «Подготовить к публикации» в разделе монтажа и повторите публикацию."
-    )
+    suffix = " (отражённое)" if mirrored else ""
+    reason = str(target.get("reason") or "")
+    if reason == "mirror_not_ready":
+        return (
+            f"Отражённая версия для «{label}»{suffix} не готова. "
+            "Включите «Создать отражённую версию» при монтаже и повторите."
+        )
+    if reason == "cover_not_ready":
+        return f"Обложка для «{label}»{suffix} не подготовлена."
+    if reason == "preparation_failed":
+        return f"Не удалось подготовить видео для «{label}»{suffix}."
+    return f"Видео для «{label}»{suffix} не подготовлено."
 
 
 def _publish_readiness(job: dict, targets: list) -> tuple[dict, list]:
@@ -1734,14 +1745,24 @@ def _publish_readiness(job: dict, targets: list) -> tuple[dict, list]:
         mirrored = bool(target.get("mirrored"))
         entry = _prepared_video_entry(job, purpose, mirrored) if purpose else None
         if entry is None:
-            missing.append({"target": target_id, "label": target.get("label"), "reason": "video"})
+            if mirrored and not mirror_variant_ready(job):
+                reason = "mirror_not_ready"
+            else:
+                reason = "video_not_ready"
+            missing.append({
+                "target": target_id, "label": target.get("label"),
+                "kind": target.get("kind"), "mirrored": mirrored, "reason": reason,
+            })
             continue
         item: dict = {"video_path": entry.get("path")}
         cover = target.get("cover_path")
         if cover:
             cover_entry = _prepared_cover_entry(job, purpose, cover)
             if cover_entry is None:
-                missing.append({"target": target_id, "label": target.get("label"), "reason": "cover"})
+                missing.append({
+                    "target": target_id, "label": target.get("label"),
+                    "kind": target.get("kind"), "mirrored": mirrored, "reason": "cover_not_ready",
+                })
                 continue
             if purpose == "youtube":
                 item["thumbnail_path"] = cover_entry.get("path")
@@ -1789,6 +1810,17 @@ async def process_prepare_publish(job_id: str, targets: list, cover_path: Option
             seen.add(key)
             needs.append({"kind": "cover", "key": key, "purpose": purpose, "mirrored": False})
 
+    # A mirrored artefact can only be produced from an already-rendered mirror
+    # variant.  Its absence is never a reason to render here (publishing and
+    # preparation never mirror) — drop those needs so the remaining targets are
+    # still prepared; publish reports the missing mirrored targets per target.
+    unresolved = [
+        item for item in needs
+        if item["kind"] == "video" and _prep_source_video(job, item["mirrored"]) is None
+    ]
+    if unresolved:
+        needs = [item for item in needs if item not in unresolved]
+
     if not needs:
         job["prepare_operation"] = None
         job["prepare_status"] = "done"
@@ -1823,10 +1855,8 @@ async def process_prepare_publish(job_id: str, targets: list, cover_path: Option
             if item["kind"] == "video":
                 source = _prep_source_video(job, item["mirrored"])
                 if source is None:
-                    raise RuntimeError(
-                        "Отражённая версия не подготовлена."
-                        if item["mirrored"] else "Видео ещё не готово."
-                    )
+                    tracker.skip(key, "Источник ещё не готов")
+                    continue
                 existing = _prepared_video_entry(job, item["purpose"], item["mirrored"])
                 if existing is not None:
                     tracker.complete(key, "Уже подготовлено")
@@ -2124,6 +2154,43 @@ async def _montage_announce(job_id: str, text: str):
             pass
 
 
+async def _finalize_montage(job_id: str) -> None:
+    """Finish the unified montage process (``ready`` / ``ready_with_warnings``).
+
+    The main MP4 and the platform artefacts are already produced by the
+    preceding phases.  A failure of an optional phase (mirrored variant or
+    platform preparation) never hides the main result: it becomes a warning and
+    the job still reaches ``done`` so the main video stays usable (spec 4).
+    """
+    job = jobs.get(job_id)
+    if not job or job.get("kind") != "montage":
+        return
+    if job.get("status") == "error":
+        return
+    params = job.get("params") or {}
+    warnings = []
+    if params.get("prepare_mirrored") and not mirror_variant_ready(job):
+        reason = str((job.get("mirror_variant") or {}).get("error") or "").strip()
+        warnings.append("Отражённая версия не подготовлена" + (f": {reason}" if reason else ""))
+    if params.get("prepare_publish", True) and job.get("prepare_status") == "error":
+        reason = str(job.get("prepare_error") or "").strip()
+        warnings.append(
+            "Подготовка файлов к публикации завершилась с ошибкой" + (f": {reason}" if reason else "")
+        )
+    job["warnings"] = warnings
+    job["phase"] = "ready_with_warnings" if warnings else "ready"
+    job["status"] = "done"
+    job["progress"] = 100
+    job["stage"] = "done"
+    job["detail"] = "Готово с предупреждениями" if warnings else "Готово"
+    _save_montage_job(job_id)
+    await broadcast_progress(job_id, 100, "done", job["detail"])
+    if warnings:
+        await _montage_announce(job_id, "Готово с предупреждениями: " + "; ".join(warnings))
+    else:
+        await _montage_announce(job_id, "Монтаж полностью готов")
+
+
 async def process_montage(job_id: str, params: dict):
     job = jobs[job_id]
     loop = asyncio.get_running_loop()
@@ -2213,17 +2280,24 @@ async def process_montage(job_id: str, params: dict):
             ),
         )
 
-        job["status"] = "done"
+        # The montage operation is not finished here: the mirrored variant and
+        # the platform-ready artefacts are produced by the same unified process
+        # (see ``_run_montage_then_variant``).  ``status`` stays ``processing``
+        # until every automatic phase is done, so the UI never reports "done"
+        # prematurely (spec section 4).  The main MP4 is already available.
+        job["status"] = "processing"
+        job["phase"] = "main_ready"
         job["progress"] = 100
-        job["stage"] = "done"
-        job["detail"] = "Готово"
+        job["stage"] = "main_ready"
+        job["detail"] = "Основной ролик готов"
         job["result"] = meta
         _save_montage_job(job_id)
         _run_cleanup_safely(_cleanup_render_artifacts, job_id, job)
-        await broadcast_progress(job_id, 100, "done", "Рендер завершён")
-        await _montage_announce(job_id, f"Готово: {Path(meta['result_video']).name} ({(os.path.getsize(meta['result_video']) >> 20)} МБ)")
+        await broadcast_progress(job_id, 100, "main_ready", "Основной ролик готов")
+        await _montage_announce(job_id, f"Основной ролик готов: {Path(meta['result_video']).name} ({(os.path.getsize(meta['result_video']) >> 20)} МБ)")
     except Exception as e:
         job["status"] = "error"
+        job["phase"] = "failed"
         job["error"] = str(e)
         job["stage"] = "error"
         job["detail"] = str(e)
@@ -2367,8 +2441,8 @@ async def process_publish(job_id: str, targets: list, publish_lock: Optional[asy
                     )
             else:
                 message = (
-                    "Отражённая версия не подготовлена. Подготовьте её в разделе монтажа "
-                    "перед публикацией перевёрнутого варианта."
+                    "Отражённая версия не готова. Включите «Создать отражённую версию» "
+                    "при монтаже и повторите."
                 )
                 for target in mirrored_targets:
                     target["preparation_error"] = message
@@ -2542,6 +2616,38 @@ async def process_publish(job_id: str, targets: list, publish_lock: Optional[asy
             publish_lock.release()
 
 
+async def _prepare_then_publish(job_id: str, targets: list, publish_lock,
+                                cover_path: Optional[str] = None, cover_id: str = "",
+                                prepare_ids: Optional[set] = None) -> None:
+    """Auto-prepare missing local artefacts, then publish (spec 6).
+
+    Runs in the background so the HTTP request returns immediately.  Preparation
+    failures never stop publishing: ``process_publish`` reports the still-missing
+    targets per target with a clear reason.  The lock is released here if the
+    preparation step is cancelled before ``process_publish`` takes over.
+    """
+    try:
+        if prepare_ids:
+            prep_targets = [t for t in targets if t.get("id") in prepare_ids]
+            await _montage_announce(job_id, "Подготовка файлов к публикации перед отправкой...")
+            try:
+                await process_prepare_publish(
+                    job_id, prep_targets, cover_path=cover_path, cover_id=cover_id
+                )
+            except Exception as exc:
+                job = jobs.get(job_id)
+                if job is not None:
+                    job["prepare_status"] = "error"
+                    job["prepare_error"] = str(exc)
+                    _save_montage_job(job_id)
+                await _montage_announce(job_id, f"Не удалось подготовить файлы: {exc}")
+    except BaseException:
+        if publish_lock is not None and publish_lock.locked():
+            publish_lock.release()
+        raise
+    await process_publish(job_id, targets, publish_lock=publish_lock)
+
+
 def download_face_model(job_id: str, progress):
     model = montage_engine.MODELS_DIR / "face_landmarker.task"
     if model.exists():
@@ -2574,6 +2680,7 @@ async def montage_status():
     status = montage_engine.montage_status()
     entries = [
         {"id": j["id"], "name": j["original_name"], "status": j["status"],
+         "phase": j.get("phase"), "warnings": list(j.get("warnings") or []),
          "created_at": j.get("created_at", "")}
         for j in jobs.values() if j.get("kind") == "montage"
     ]
@@ -2794,6 +2901,8 @@ async def start_montage(
         "project_id": project_id,
         "kind": "montage",
         "status": "uploaded",
+        "phase": "queued",
+        "warnings": [],
         "progress": 0,
         "stage": "",
         "detail": "",
@@ -2863,19 +2972,30 @@ async def start_montage(
                 _save_projects()
     async def _run_montage_then_variant() -> None:
         await process_montage(job_id, params)
-        if jobs.get(job_id, {}).get("status") != "done":
+        job = jobs.get(job_id) or {}
+        if job.get("status") == "error":
             return
+        # ---- Phase B: mirrored variant (optional, one toggle) ----
         if params.get("prepare_mirrored"):
-            await process_mirror_variant(job_id)
-        # The montage stage fully prepares the publish-ready variants so that
-        # publishing only sends ready files (spec: montage prepares, publish sends).
+            job["phase"] = "rendering_mirror"
+            _save_montage_job(job_id)
+            if not mirror_variant_ready(job):
+                await process_mirror_variant(job_id)
+        # ---- Phase C: platform-ready artefacts (automatic) ----
         if params.get("prepare_publish", True):
+            job["phase"] = "preparing_platform_variants"
+            _save_montage_job(job_id)
             try:
                 await process_prepare_publish(
-                    job_id, _default_prepare_targets(jobs[job_id])
+                    job_id, _default_prepare_targets(job)
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                job["prepare_status"] = "error"
+                job["prepare_error"] = str(exc)
+        # ---- Phase D: verify and finalize (no premature done) ----
+        job["phase"] = "verifying_outputs"
+        _save_montage_job(job_id)
+        await _finalize_montage(job_id)
 
     asyncio.create_task(_run_montage_then_variant())
     if propose_cover:
@@ -2898,7 +3018,10 @@ async def publish_montage(
     job = jobs[job_id]
     if job["status"] == "publishing":
         raise HTTPException(409, "Публикация уже выполняется для этого ролика")
-    if job["status"] != "done" or not job.get("result"):
+    # The unified pipeline may still be finishing optional phases (mirroring /
+    # platform preparation) after the main render.  The main video is already
+    # available, so publishing is allowed as soon as a result exists.
+    if not job.get("result") or job["status"] not in {"done", "completed", "processing"}:
         raise HTTPException(400, "Сначала завершите рендер")
     try:
         requested_targets = json.loads(targets_json)
@@ -2963,31 +3086,25 @@ async def publish_montage(
             target["text"] = text.strip()
             target["caption"] = text.strip()
         targets.append(target)
-    # A mirrored target needs an already-prepared (and non-stale) mirrored
-    # variant.  Publishing never renders it (spec 9.1 / 9.3B), so reject early
-    # with an actionable message instead of failing mid-publish.
-    if any(target.get("mirrored") for target in targets) and not mirror_variant_ready(job):
-        raise HTTPException(
-            409,
-            "Отражённая версия не подготовлена. Подготовьте её в разделе монтажа "
-            "перед публикацией перевёрнутого варианта.",
+    # Publishing automatically prepares every missing local artefact first (spec
+    # 6) — the user never presses a separate "prepare" button.  Mirrored targets
+    # whose mirror variant was never rendered cannot be produced here (publish
+    # and preparation never mirror); they fail per target with a clear reason.
+    _, missing_targets = _publish_readiness(job, targets)
+    preparable_ids = {
+        item.get("target") for item in missing_targets
+        if item.get("reason") in {"video_not_ready", "cover_not_ready"}
+    }
+    auto_prepare = [t.get("id") for t in targets if t.get("id") in preparable_ids]
+    mirror_blocked = [item for item in missing_targets if item.get("reason") == "mirror_not_ready"]
+    if mirror_blocked:
+        blocked_labels = ", ".join(
+            str(item.get("label") or item.get("target")) for item in mirror_blocked
         )
-    # Publishing never transcodes: every selected variant (and cover) must have
-    # been prepared locally first.  Reject early with an actionable message so
-    # the UI can offer a dedicated "prepare for publishing" step (spec 1).
-    _prepared_targets, missing_targets = _publish_readiness(job, targets)
-    if missing_targets:
-        missing_labels = ", ".join(
-            str(item.get("label") or item.get("target")) for item in missing_targets
-        )
-        return JSONResponse(
-            status_code=409,
-            content={
-                "detail": "Публикация не запущена: файлы не подготовлены ("
-                          + missing_labels
-                          + "). Подготовьте видео к публикации в разделе монтажа.",
-                "prepare_targets": [str(item.get("target")) for item in missing_targets],
-            },
+        await _montage_announce(
+            job_id,
+            f"Отражённая версия не готова — цели ({blocked_labels}) будут пропущены. "
+            "Включите «Создать отражённую версию» и повторите монтаж.",
         )
     # Atomic per-job reservation: acquire the lock before creating the
     # background task so two near-simultaneous requests can never start two
@@ -3000,94 +3117,24 @@ async def publish_montage(
         job["selected_cover_id"] = cover_id
         job["last_publish_targets"] = targets
         _save_montage_job(job_id)
-        asyncio.create_task(process_publish(job_id, targets, publish_lock=lock))
+        asyncio.create_task(
+            _prepare_then_publish(
+                job_id, targets, lock,
+                cover_path=str(cover_path) if cover_id else None,
+                cover_id=cover_id,
+                prepare_ids=set(preparable_ids),
+            )
+        )
     except BaseException:
         if lock.locked():
             lock.release()
         raise
-    return {"job_id": job_id, "status": "publishing", "targets": [t.get("kind") for t in targets]}
-
-
-@app.post("/api/montage/{job_id}/prepare-mirror")
-async def prepare_montage_mirror(job_id: str):
-    """Prepare the mirrored publish variant as a separate montage operation.
-
-    Implements scenario B of spec 9.3: the user rendered the video first and
-    now needs the reflected version before publishing the mirrored targets.
-    """
-    if job_id not in jobs or jobs[job_id].get("kind") != "montage":
-        raise HTTPException(404, "Montage job not found")
-    job = jobs[job_id]
-    if job["status"] not in {"done", "completed"} or not job.get("result"):
-        raise HTTPException(400, "Сначала завершите рендер")
-    if mirror_variant_ready(job):
-        return {"job_id": job_id, "status": "ready"}
-    current = job.get("mirror_variant") or {}
-    if current.get("status") == "generating":
-        return {"job_id": job_id, "status": "generating"}
-    job["mirror_variant"] = {
-        "status": "generating", "progress": 0,
-        "detail": "Подготовка отражённой версии", "error": "",
-        "path": None, "signature": _mirrored_variant_signature(job), "operation": None,
+    return {
+        "job_id": job_id,
+        "status": "publishing",
+        "targets": [t.get("kind") for t in targets],
+        "auto_prepare": auto_prepare,
     }
-    _save_montage_job(job_id)
-    asyncio.create_task(process_mirror_variant(job_id))
-    return {"job_id": job_id, "status": "generating"}
-
-
-@app.post("/api/montage/{job_id}/prepare-publish")
-async def prepare_montage_publish(
-    job_id: str,
-    targets_json: str = Form(...),
-    cover_id: str = Form(""),
-):
-    """Locally prepare every artefact the selected publish targets need.
-
-    Publishing itself only sends ready files (spec 1); this endpoint performs
-    the video normalisation and cover conversion ahead of time.
-    """
-    if job_id not in jobs or jobs[job_id].get("kind") != "montage":
-        raise HTTPException(404, "Montage job not found")
-    job = jobs[job_id]
-    if job["status"] not in {"done", "completed"} or not job.get("result"):
-        raise HTTPException(400, "Сначала завершите рендер")
-    try:
-        requested_targets = json.loads(targets_json)
-    except json.JSONDecodeError:
-        raise HTTPException(400, "targets_json must be valid JSON")
-    if not isinstance(requested_targets, list) or not requested_targets:
-        raise HTTPException(400, "Список целей пуст")
-    target_ids = list(dict.fromkeys(str(item) for item in requested_targets))
-    unknown = [target_id for target_id in target_ids if target_id not in _PUBLISH_TARGET_SPECS]
-    if unknown:
-        raise HTTPException(400, f"Неизвестные цели публикации: {', '.join(unknown)}")
-    cover_path = None
-    if cover_id:
-        selected_cover = next(
-            (item for item in job.get("covers") or [] if item.get("id") == cover_id), None
-        )
-        if selected_cover is None:
-            raise HTTPException(400, "Выбранная обложка не найдена")
-        candidate = MONTAGE_WORK / job_id / "covers" / Path(str(selected_cover.get("file") or "")).name
-        if not candidate.exists():
-            raise HTTPException(400, "Файл выбранной обложки недоступен")
-        cover_path = str(candidate)
-    targets = []
-    for target_id in target_ids:
-        kind, mirrored, label = _PUBLISH_TARGET_SPECS[target_id]
-        targets.append({"id": target_id, "kind": kind, "mirrored": mirrored, "label": label})
-    if job.get("prepare_status") == "running":
-        return {"job_id": job_id, "status": "running"}
-    if any(target.get("mirrored") for target in targets) and not mirror_variant_ready(job):
-        raise HTTPException(
-            409,
-            "Отражённая версия не подготовлена. Подготовьте её в разделе монтажа "
-            "перед подготовкой перевёрнутого варианта.",
-        )
-    job["selected_cover_id"] = cover_id
-    _save_montage_job(job_id)
-    asyncio.create_task(process_prepare_publish(job_id, targets, cover_path, cover_id))
-    return {"job_id": job_id, "status": "preparing"}
 
 
 _youtube_reauth_state: dict[str, str] = {"status": "idle", "detail": ""}
@@ -3133,6 +3180,8 @@ async def montage_result(job_id: str):
     return {
         "id": job_id,
         "status": job["status"],
+        "phase": job.get("phase"),
+        "warnings": list(job.get("warnings") or []),
         "progress": job["progress"],
         "stage": job["stage"],
         "detail": job["detail"],

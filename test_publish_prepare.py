@@ -303,23 +303,42 @@ class PublishWithoutTranscodeTests(PrepareBase):
 
 
 class PublishGuardTests(PrepareBase):
-    def test_publish_endpoint_409_lists_unprepared_targets(self):
+    def test_publish_endpoint_auto_prepares_unprepared_targets(self):
         async def scenario():
-            job_id = "guard_409"
+            job_id = "guard_auto_prep"
             workdir = app_module.MONTAGE_WORK / job_id
             workdir.mkdir(parents=True)
             make_job(job_id, workdir)
-            with mock.patch.object(app_module, "_save_montage_job", lambda *a, **k: None):
+            prepared = []
+            published = []
+
+            async def fake_announce(*a, **k):
+                return None
+
+            async def fake_prepare(jid, targets, cover_path=None, cover_id=""):
+                prepared.append([t["id"] for t in targets])
+
+            async def fake_publish(jid, targets, publish_lock=None):
+                published.append([t["id"] for t in targets])
+                if publish_lock and publish_lock.locked():
+                    publish_lock.release()
+
+            with mock.patch.object(app_module, "_save_montage_job", lambda *a, **k: None), \
+                    mock.patch.object(app_module, "_montage_announce", side_effect=fake_announce), \
+                    mock.patch.object(app_module, "process_prepare_publish", side_effect=fake_prepare), \
+                    mock.patch.object(app_module, "process_publish", side_effect=fake_publish):
                 async with self._client() as client:
                     resp = await client.post(
                         f"/api/montage/{job_id}/publish",
                         data={"targets_json": json.dumps(["instagram_feed", "youtube"]), "title": "T"},
                     )
-            self.assertEqual(resp.status_code, 409)
-            data = resp.json()
-            self.assertIn("prepare_targets", data)
-            self.assertIn("instagram_feed", data["prepare_targets"])
-            self.assertIn("youtube", data["prepare_targets"])
+                await asyncio.sleep(0.05)
+            # The endpoint itself never 409s for missing artefacts: it schedules
+            # auto-preparation and then publishing of the same targets.
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(sorted(resp.json()["auto_prepare"]), ["instagram_feed", "youtube"])
+            self.assertEqual(prepared, [["instagram_feed", "youtube"]])
+            self.assertEqual(published, [["instagram_feed", "youtube"]])
         asyncio.run(scenario())
 
     def test_publish_endpoint_allows_prepared_target(self):

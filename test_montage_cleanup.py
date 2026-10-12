@@ -197,10 +197,11 @@ class MontageCleanupTests(unittest.TestCase):
                 mock.patch.object(app.montage_engine, "render_montage", side_effect=render):
             asyncio.run(app.process_montage(job["id"], params))
 
-        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["status"], "processing")
+        self.assertEqual(job["phase"], "main_ready")
         self.assertFalse((workdir / "normalized_source.mp4").exists())
         saved = json.loads((workdir / "job_state.json").read_text(encoding="utf-8"))
-        self.assertEqual(saved["status"], "done")
+        self.assertEqual(saved["status"], "processing")
         self.assertEqual(saved["result"]["result_video"], str(workdir / "final.mp4"))
 
     def test_failed_render_does_not_cleanup(self):
@@ -234,9 +235,36 @@ class MontageCleanupTests(unittest.TestCase):
                 mock.patch.object(app, "_cleanup_render_artifacts", side_effect=RuntimeError("cleanup crashed")):
             asyncio.run(app.process_montage(job["id"], job["params"]))
 
-        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["status"], "processing")
+        self.assertEqual(job["phase"], "main_ready")
         self.assertIsNone(job["error"])
         self.assertIn("cleanup crashed", (workdir / "cleanup.log").read_text(encoding="utf-8"))
+
+    def test_finalize_montage_marks_ready_without_warnings(self):
+        job, _ = self.make_job(job_id="finishok", status="processing")
+        job["params"] = {"prepare_publish": True}
+        job["prepare_status"] = "done"
+        with mock.patch.object(app, "_save_montage_job", lambda *a, **k: None), \
+                mock.patch.object(app, "_montage_announce", new=mock.AsyncMock()):
+            asyncio.run(app._finalize_montage(job["id"]))
+
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["phase"], "ready")
+        self.assertEqual(job["warnings"], [])
+
+    def test_finalize_montage_records_prepare_warning(self):
+        job, _ = self.make_job(job_id="finishwarn", status="processing")
+        job["params"] = {"prepare_publish": True}
+        job["prepare_status"] = "error"
+        job["prepare_error"] = "ffmpeg boom"
+        with mock.patch.object(app, "_save_montage_job", lambda *a, **k: None), \
+                mock.patch.object(app, "_montage_announce", new=mock.AsyncMock()):
+            asyncio.run(app._finalize_montage(job["id"]))
+
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["phase"], "ready_with_warnings")
+        self.assertTrue(any("ffmpeg boom" in warning for warning in job["warnings"]),
+                        job["warnings"])
 
     def test_recovery_retries_cleanup_and_preserves_download_and_preview(self):
         job, workdir = self.make_job(job_id="recover01", status="processing")

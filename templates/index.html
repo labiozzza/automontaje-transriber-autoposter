@@ -101,6 +101,7 @@ h1 {
 .target-row input[type="text"], .target-row textarea { flex: 1; min-width: 180px; }
 .publish-results { margin-top: 12px; }
 .publish-results .badge { margin-right: 6px; }
+.publish-results a { overflow-wrap: anywhere; word-break: break-word; }
 .publish-modal {
   position: fixed; inset: 0; z-index: 1000; display: none;
   align-items: center; justify-content: center; padding: 20px;
@@ -1290,7 +1291,7 @@ select option { background: var(--surface2); }
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Создать отражённую версию</div>
-            <div class="toggle-desc">Дополнительный ролик с отражённым по горизонтали видео (субтитры и наложения не отражаются). Основной ролик всегда без отражения. Если выключено, отражённую версию можно создать позже из окна публикации.</div>
+            <div class="toggle-desc">Дополнительный ролик с отражённым по горизонтали видео (субтитры и наложения не отражаются). Основной ролик всегда без отражения. Отражённая версия и файлы для публикации готовятся автоматически в рамках монтажа. Если выключено, перевёрнутые цели публикации недоступны.</div>
           </div>
           <label class="toggle">
             <input type="checkbox" id="montagePrepareMirrored">
@@ -1397,13 +1398,9 @@ select option { background: var(--surface2); }
           <button class="btn btn-primary" id="openPublishWindowBtn" disabled onclick="openPublishWindow()">Открыть окно публикации</button>
           <div class="publish-results" id="montagePublishResults"></div>
 
-          <div class="card-title" style="margin-top:20px">Отражённая версия</div>
-          <div id="montageMirrorVariantInfo" style="font-size:13px;color:var(--text2)">Не подготовлена</div>
-          <button class="btn" id="prepareMirrorBtn" disabled onclick="prepareMirrorVariant()">Подготовить отражённую версию</button>
-
           <div class="card-title" style="margin-top:20px">Подготовка к публикации</div>
+          <div id="montageMirrorVariantInfo" style="font-size:13px;color:var(--text2)">Отражённая версия: не подготовлена</div>
           <div id="montagePrepareInfo" style="font-size:13px;color:var(--text2)">Готовится автоматически после монтажа</div>
-          <button class="btn" id="preparePublishBtn" disabled onclick="preparePublishTargets()">Подготовить к публикации</button>
         </div>
       </div>
     </section>
@@ -3298,6 +3295,11 @@ function buildOpsState(state) {
       progress: anyIndeterminate ? null : average, detail: detailBits.join(' · '),
       warning: warning, stages: null, targets: targets });
   }
+  const jobWarnings = Array.isArray(state.warnings) ? state.warnings.filter(Boolean) : [];
+  if (jobWarnings.length) {
+    const montage = ops.find(function(o) { return o.key === 'montage'; });
+    if (montage) montage.warning = [montage.warning].concat(jobWarnings).filter(Boolean).join(' · ');
+  }
   return ops;
 }
 
@@ -3341,9 +3343,13 @@ function renderOperations(state) {
       else if (main.status === 'error' || main.status === 'failed') title = 'Ошибка публикации';
       else if (main.status === 'needs_check' || main.status === 'unknown') title = 'Требуется проверка';
     }
-    if (main.key === 'montage' && (main.status === 'done' || main.status === 'completed') && !main.warning) {
-      const published = ops.find(function(o) { return o.key === 'publish'; });
-      title = published && published.status === 'done' ? 'Опубликовано' : 'Видео готово';
+    if (main.key === 'montage' && (main.status === 'done' || main.status === 'completed')) {
+      if (main.warning) {
+        title = 'Видео готово с предупреждениями';
+      } else {
+        const published = ops.find(function(o) { return o.key === 'publish'; });
+        title = published && published.status === 'done' ? 'Опубликовано' : 'Видео готово';
+      }
     }
     titleEl.textContent = title;
     if (main.error) {
@@ -3395,28 +3401,25 @@ function mirrorVariantReady() {
 
 function applyMirrorVariantState(data) {
   const info = document.getElementById('montageMirrorVariantInfo');
-  const btn = document.getElementById('prepareMirrorBtn');
   const notice = document.getElementById('montageMirrorPublishNotice');
   const mv = (data && data.mirror_variant) || (window.__opsState && window.__opsState.mirror_variant) || null;
   const ready = !!(data && data.variants && data.variants.mirrored_ready) || mirrorVariantReady();
   const status = mv && mv.status ? mv.status : (ready ? 'done' : 'idle');
-  const hasResult = !!(data && data.result) || !!(window.__opsState && window.__opsState.result);
   if (info) {
-    if (status === 'generating') info.textContent = 'Подготовка… ' + Math.round(Number(mv && mv.progress) || 0) + '%';
-    else if (status === 'done' || ready) info.textContent = 'Готова к публикации';
-    else if (status === 'error') info.textContent = 'Ошибка: ' + ((mv && mv.error) || 'не удалось подготовить');
-    else info.textContent = 'Не подготовлена';
+    if (status === 'generating') info.textContent = 'Отражённая версия: подготовка… ' + Math.round(Number(mv && mv.progress) || 0) + '%';
+    else if (status === 'done' || ready) info.textContent = 'Отражённая версия: готова к публикации';
+    else if (status === 'error') info.textContent = 'Отражённая версия: ошибка — ' + ((mv && mv.error) || 'не удалось подготовить');
+    else info.textContent = 'Отражённая версия: не подготовлена';
   }
-  if (btn) btn.disabled = !hasResult || status === 'generating' || ready;
   const mirrorBoxes = document.querySelectorAll('.publish-mirror-target');
   mirrorBoxes.forEach(function(box) {
     box.disabled = !ready;
     if (!ready) box.checked = false;
   });
   if (notice) {
-    if (!ready && hasResult) {
+    if (!ready) {
       notice.style.display = '';
-      notice.textContent = 'Отражённая версия не подготовлена. Подготовьте её в разделе «Отражённая версия» перед публикацией перевёрнутых вариантов.';
+      notice.textContent = 'Отражённая версия не готова. Включите «Создать отражённую версию» при монтаже — перевёрнутые цели станут доступны после её подготовки.';
     } else {
       notice.style.display = 'none';
       notice.textContent = '';
@@ -3440,60 +3443,12 @@ function applyPrepareState(data) {
     else info.textContent = 'Готовится автоматически после монтажа';
   }
   const ready = publishReadyMap(state);
-  const prepareBtn = document.getElementById('preparePublishBtn');
-  const hasResult = !!(state.result || (window.__opsState && window.__opsState.result));
-  if (prepareBtn) prepareBtn.disabled = !hasResult || status === 'running';
-  if (!ready) return;
   for (const box of document.querySelectorAll('.publish-target-checkbox')) {
-    const ok = !!ready[box.value];
-    box.disabled = !ok;
-    if (!ok) box.checked = false;
+    if (box.classList.contains('publish-mirror-target')) continue;
     const label = box.parentElement;
-    if (label) label.title = ok ? '' : 'Видео для этой площадки ещё не подготовлено';
+    if (label) label.title = '';
   }
-}
-
-async function preparePublishTargets() {
-  if (!montageJobId) return;
-  const btn = document.getElementById('preparePublishBtn');
-  if (btn) btn.disabled = true;
-  const targets = ['instagram_feed', 'youtube'];
-  if (mirrorVariantReady()) { targets.push('instagram_feed_mirrored', 'youtube_mirrored'); }
-  const form = new FormData();
-  form.append('targets_json', JSON.stringify(targets));
-  if (window.__selectedCoverId) form.append('cover_id', window.__selectedCoverId);
-  try {
-    const res = await fetch('/api/montage/' + encodeURIComponent(montageJobId) + '/prepare-publish', {method: 'POST', body: form});
-    const data = await res.json().catch(function() { return {}; });
-    if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
-    mergeOpsState({prepare_status: 'running'});
-    renderOperations(window.__opsState);
-    applyPrepareState(window.__opsState);
-    startMontagePolling();
-  } catch (e) {
-    const info = document.getElementById('montagePrepareInfo');
-    if (info) info.textContent = 'Ошибка: ' + e.message;
-    if (btn) btn.disabled = false;
-  }
-}
-
-async function prepareMirrorVariant() {
-  if (!montageJobId) return;
-  const btn = document.getElementById('prepareMirrorBtn');
-  if (btn) btn.disabled = true;
-  try {
-    const res = await fetch('/api/montage/' + encodeURIComponent(montageJobId) + '/prepare-mirror', {method: 'POST'});
-    const data = await res.json().catch(function() { return {}; });
-    if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
-    mergeOpsState({mirror_variant: {status: 'generating', progress: 0, detail: 'Подготовка отражённой версии'}});
-    renderOperations(window.__opsState);
-    applyMirrorVariantState(window.__opsState);
-    startMontagePolling();
-  } catch (e) {
-    const info = document.getElementById('montageMirrorVariantInfo');
-    if (info) info.textContent = 'Ошибка: ' + e.message;
-    if (btn) btn.disabled = false;
-  }
+  return ready;
 }
 
 async function refreshMontageResult() {
@@ -3705,7 +3660,7 @@ async function publishMontage() {
   }
   const mirrorSelected = targets.some(t => t.endsWith('_mirrored'));
   if (mirrorSelected && !mirrorVariantReady()) {
-    publishWindowError('Отражённая версия не подготовлена. Подготовьте её в разделе «Отражённая версия» перед публикацией.');
+    publishWindowError('Отражённая версия не готова. Включите «Создать отражённую версию» при монтаже и повторите.');
     return;
   }
   const unknownSelected = targets.filter(tid => (window.__publishUnknown || []).includes(tid));
@@ -3746,12 +3701,7 @@ async function publishMontage() {
     const res = await fetch(`/api/montage/${montageJobId}/publish`, { method: 'POST', body: form, signal: controller.signal });
     const data = await res.json();
     if (!res.ok) {
-      if (res.status === 409 && Array.isArray(data.prepare_targets) && data.prepare_targets.length) {
-        publishWindowError(data.detail || 'Видео ещё не подготовлено к публикации. Запустите подготовку.');
-        preparePublishTargets();
-      } else {
-        publishWindowError(data.detail || 'Ошибка публикации');
-      }
+      publishWindowError(data.detail || 'Ошибка публикации');
       document.getElementById('montagePublishBtn').disabled = false;
       document.getElementById('montagePublishBtn').textContent = 'Начать публикацию';
       return;

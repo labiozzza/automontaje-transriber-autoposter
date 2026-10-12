@@ -185,7 +185,7 @@ class PublishEndpointGuardTest(unittest.TestCase):
                         data={"targets_json": json.dumps([TARGET]), "new_publication": "true"},
                     )
                     self.assertEqual(published_again.status_code, 200)
-                    await asyncio.sleep(0)
+                    await asyncio.sleep(0.05)
                     self.assertEqual(calls, ["guard_published_no_repeat"])
 
         self._run(scenario())
@@ -210,8 +210,8 @@ class PublishEndpointGuardTest(unittest.TestCase):
                         f"/api/montage/{job_id}/publish",
                         data={"targets_json": json.dumps([TARGET])},
                     )
+                await asyncio.sleep(0.05)
             self.assertEqual(resp.status_code, 200)
-            await asyncio.sleep(0)
             self.assertEqual(calls, [[TARGET]])
 
         self._run(scenario())

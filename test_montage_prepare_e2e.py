@@ -1,12 +1,13 @@
 """
-E2E тест подготовки к публикации (реальный FFmpeg, без отправки в соцсети).
+E2E тест единого автоматического процесса монтажа (реальный FFmpeg, без отправки в соцсети).
 
-Проверяет, что монтаж/подготовка создают обычную и отражённую версии и
-платформенные артефакты, а публикация только отправляет готовые файлы.
+Проверяет, что один запуск монтажа с включённым отражением сам создаёт обычную и
+отражённую версии и все платформенные артефакты, без ручных кнопок подготовки.
+Публикация (сетевые операции) здесь не запускается вообще.
 
 ВАЖНО: этот тест НИКОГДА не вызывает POST /publish и не публикует ничего в
-реальные соцсети. Guard «нет подготовки → 409» проверяется отдельным мок-тестом
-test_publish_endpoint_409_lists_unprepared_targets в test_publish_prepare.py.
+реальные соцсети. Авто-подготовка при публикации и guard-поведение проверяются
+отдельными мок-тестами (test_publish_prepare.py).
 
 Требует запущенный сервер на 127.0.0.1:8000 и синтетическое видео
 /tmp/montage_test.mp4 + /tmp/montage_segments.srt (см. test_montage_e2e.py).
@@ -114,58 +115,19 @@ def main():
     data = poll(job_id, lambda d: d.get("status") in ("done", "error", "published"))
     check("Рендер завершился", data.get("status") == "done", data.get("status"))
 
-    # 1. До подготовки ни одна цель не готова — публикация отклонилась бы 409.
-    #    Реального запроса на /publish здесь НЕТ: этот e2e не должен публиковать.
+    # 1. Монтаж без подготовки: платформенные артефакты не создаются, ни одна
+    #    цель публикации и отражённая версия не готовы. Запроса на /publish НЕТ.
     ready0 = data.get("publish_ready") or {}
-    check("До подготовки все цели не готовы",
+    check("Без подготовки все цели не готовы",
           bool(ready0) and not any(ready0.values()),
           str(ready0))
-    # Сам guard проверяется мок-тестом test_publish_endpoint_409_lists_unprepared_targets.
+    check("Без подготовки отражённая версия не готова",
+          not (data.get("variants") or {}).get("mirrored_ready"),
+          str(data.get("variants")))
 
-    # 2. Готовим обычные артефакты (реальный FFmpeg).
-    code, _ = post_form(f"{BASE}/api/montage/{job_id}/prepare-publish", {
-        "targets_json": json.dumps(["instagram_feed", "youtube"]),
-    })
-    check("Старт подготовки обычных версий", code == 200, f"code={code}")
-    data = poll(job_id, lambda d: d.get("prepare_status") in ("done", "error"), timeout=300)
-    check("Подготовка обычных версий завершена", data.get("prepare_status") == "done",
-          str(data.get("prepare_error")))
-    ready = data.get("publish_ready") or {}
-    check("instagram_feed готов", ready.get("instagram_feed"), str(ready))
-    check("youtube готов", ready.get("youtube"), str(ready))
-
-    # 3. Готовим отражённую версию, затем её артефакты.
-    code, _ = post_form(f"{BASE}/api/montage/{job_id}/prepare-mirror", {})
-    check("Старт подготовки отражённой версии", code == 200, f"code={code}")
-    data = poll(job_id, lambda d: (d.get("mirror_variant") or {}).get("status") in ("done", "error"),
-                timeout=180)
-    mv = data.get("mirror_variant") or {}
-    check("Отражённая версия готова", mv.get("status") == "done", str(mv.get("error")))
-
-    code, _ = post_form(f"{BASE}/api/montage/{job_id}/prepare-publish", {
-        "targets_json": json.dumps(["instagram_feed_mirrored", "youtube_mirrored"]),
-    })
-    check("Старт подготовки отражённых версий", code == 200, f"code={code}")
-    data = poll(job_id, lambda d: d.get("prepare_status") in ("done", "error"), timeout=300)
-    check("Подготовка отражённых версий завершена", data.get("prepare_status") == "done",
-          str(data.get("prepare_error")))
-    ready = data.get("publish_ready") or {}
-    check("instagram_feed_mirrored готов", ready.get("instagram_feed_mirrored"), str(ready))
-    check("youtube_mirrored готов", ready.get("youtube_mirrored"), str(ready))
-
-    # 4. Подготовленные файлы существуют и отличаются от исходника.
-    work = Path(data.get("result", {}).get("result_video") or "")
-    workdir = work.parent / "publish_prep"
-    files = sorted(p.name for p in workdir.glob("*.mp4")) if workdir.exists() else []
-    check("Файлы подготовки созданы", len(files) >= 3, f"files={files}")
-    ig_main = next((p for p in workdir.glob("*instagram_main*") if p.is_file()), None) if workdir.exists() else None
-    check("Обычная Instagram-версия создана", ig_main is not None, f"files={files}")
-    if ig_main is not None and work.exists():
-        check("Обычная Instagram-версия отличается по размеру от исходника",
-              ig_main.stat().st_size != work.stat().st_size,
-              f"main={work.stat().st_size} prepared={ig_main.stat().st_size}")
-
-    # 5. Автоподготовка: рендер с prepare_publish=true сам готовит артефакты.
+    # 2. Единый автоматический процесс: один запуск монтажа с prepare_publish и
+    #    prepare_mirrored сам готовит обычную + отражённую версии и все
+    #    платформенные артефакты. Ручных вызовов подготовки больше нет.
     resp2 = post_multipart(f"{BASE}/api/montage/render", [
         ("video", ("montage_test.mp4", VIDEO)),
         ("srt", ("segments.srt", SRT)),
@@ -174,17 +136,44 @@ def main():
         ("autozoom", "false"),
         ("subtitles", "true"),
         ("bigpickle", "false"),
+        ("prepare_publish", "true"),
+        ("prepare_mirrored", "true"),
     ])
     job2 = resp2.get("job_id")
     check("Второй рендер создал job_id", bool(job2), resp2)
+
     data2 = poll(job2, lambda d: d.get("status") in ("done", "error"), timeout=300)
-    check("Второй рендер завершился", data2.get("status") == "done", data2.get("status"))
-    # автоподготовка запускается сразу после рендера
-    data2 = poll(job2, lambda d: d.get("prepare_status") in ("done", "error"), timeout=300)
-    check("Автоподготовка завершилась", data2.get("prepare_status") == "done",
+    check("Единый процесс завершился", data2.get("status") == "done", data2.get("status"))
+    check("Фаза ready (без предупреждений)", data2.get("phase") == "ready",
+          f"phase={data2.get('phase')} warnings={data2.get('warnings')}")
+    check("Предупреждений нет", not (data2.get("warnings") or []), str(data2.get("warnings")))
+    check("Подготовка к публикации завершена", data2.get("prepare_status") == "done",
           str(data2.get("prepare_error")))
-    ready2 = data2.get("publish_ready") or {}
-    check("Автоподготовка: instagram_feed готов", ready2.get("instagram_feed"), str(ready2))
+
+    mv = data2.get("mirror_variant") or {}
+    check("Отражённая версия готова (авто)",
+          mv.get("status") == "done" and (data2.get("variants") or {}).get("mirrored_ready"),
+          str(mv.get("error")))
+
+    ready = data2.get("publish_ready") or {}
+    check("instagram_feed готов (авто)", ready.get("instagram_feed"), str(ready))
+    check("youtube готов (авто)", ready.get("youtube"), str(ready))
+    check("instagram_feed_mirrored готов (авто)", ready.get("instagram_feed_mirrored"), str(ready))
+    check("youtube_mirrored готов (авто)", ready.get("youtube_mirrored"), str(ready))
+
+    # 3. Подготовленные файлы существуют и отличаются от исходника.
+    work = Path(data2.get("result", {}).get("result_video") or "")
+    workdir = work.parent / "publish_prep"
+    files = sorted(p.name for p in workdir.glob("*.mp4")) if workdir.exists() else []
+    check("Файлы подготовки созданы", len(files) >= 3, f"files={files}")
+    ig_main = next((p for p in workdir.glob("*instagram_main*") if p.is_file()), None) if workdir.exists() else None
+    check("Обычная Instagram-версия создана", ig_main is not None, f"files={files}")
+    ig_mirror = next((p for p in workdir.glob("*instagram_mirror*") if p.is_file()), None) if workdir.exists() else None
+    check("Отражённая Instagram-версия создана", ig_mirror is not None, f"files={files}")
+    if ig_main is not None and work.exists():
+        check("Обычная Instagram-версия отличается по размеру от исходника",
+              ig_main.stat().st_size != work.stat().st_size,
+              f"main={work.stat().st_size} prepared={ig_main.stat().st_size}")
 
     print("\n==================================================")
     print(f"ИТОГО: {PASS} PASS, {FAIL} FAIL")

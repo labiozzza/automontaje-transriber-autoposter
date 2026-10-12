@@ -153,19 +153,32 @@ class MirrorVariantTests(Part2Base):
         self.assertIn("ffmpeg died", job["mirror_variant"]["error"])
         self.assertFalse(app_module.mirror_variant_ready(job))
 
-    def test_publish_endpoint_rejects_unprepared_mirror(self):
+    def test_publish_endpoint_fails_unprepared_mirror_per_target(self):
         async def scenario():
             job_id = "p2pub_reject"
             workdir = app_module.MONTAGE_WORK / job_id
             workdir.mkdir(parents=True)
             make_job(job_id, workdir)
-            with mock.patch.object(app_module, "_save_montage_job", lambda *a, **k: None):
+            captured = {}
+
+            async def fake_publish(jid, targets, publish_lock=None):
+                captured["targets"] = targets
+                if publish_lock is not None and publish_lock.locked():
+                    publish_lock.release()
+
+            with mock.patch.object(app_module, "_save_montage_job", lambda *a, **k: None), \
+                    mock.patch.object(app_module, "process_publish", side_effect=fake_publish):
                 async with self._client() as client:
                     resp = await client.post(
                         f"/api/montage/{job_id}/publish",
                         data={"targets_json": json.dumps(["youtube_mirrored"]), "title": "T"},
                     )
-            self.assertEqual(resp.status_code, 409)
+                await asyncio.sleep(0.05)
+            # Publishing is accepted (200) but the mirror is not preparable here,
+            # so it must be handed to process_publish for a per-target failure.
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.json().get("auto_prepare"), [])
+            self.assertEqual([t["id"] for t in captured["targets"]], ["youtube_mirrored"])
         asyncio.run(scenario())
 
     def test_publish_endpoint_accepts_prepared_mirror(self):

@@ -3,8 +3,8 @@
 Covers the new spec items:
   * a dedicated «Подготовка к публикации» operation appears and becomes the main
     operation while preparation runs;
-  * publish target checkboxes are disabled/unchecked until their artefact is
-    prepared and enabled once ready;
+  * publish target checkboxes are never disabled by preparation (artefacts are
+    prepared automatically), while mirrored targets follow the mirror state;
   * level-3 stage folders of different targets expand/collapse independently;
   * failed operations show «—» instead of 100%;
   * running stages expose an elapsed-time label.
@@ -90,7 +90,8 @@ def main():
         check("publish wins over prepare", page.text_content("#operationTitle") == "Публикация",
               page.text_content("#operationTitle"))
 
-        # 3. applyPrepareState disables unprepared targets and enables ready ones.
+        # 3. applyPrepareState surfaces readiness but never disables normal targets
+        #    (preparation is automatic; publish prepares any missing artefact).
         page.evaluate("""() => {
           window.__opsState = {result: {result_video: 'x.mp4'}, prepare_status: 'done',
             publish_ready: {instagram_feed: true, youtube: true, instagram_trial: true,
@@ -99,9 +100,9 @@ def main():
           applyPrepareState(window.__opsState);
         }""")
         ready = page.evaluate("() => { const cb = document.querySelector('.publish-target-checkbox[value=\"instagram_feed\"]'); return {d: cb.disabled, c: cb.checked}; }")
-        notready = page.evaluate("() => { const cb = document.querySelector('.publish-target-checkbox[value=\"youtube_mirrored\"]'); return {d: cb.disabled, c: cb.checked}; }")
+        disabled = page.evaluate("() => Array.from(document.querySelectorAll('.publish-target-checkbox:not(.publish-mirror-target)')).filter(c => c.disabled).map(c => c.value)")
         check("ready target enabled+checked", ready["d"] is False and ready["c"] is True, str(ready))
-        check("unprepared target disabled+unchecked", notready["d"] is True and notready["c"] is False, str(notready))
+        check("preparation never disables targets", len(disabled) == 0, str(disabled))
         check("prepare info shows done", "подготовлено" in page.text_content("#montagePrepareInfo").lower(),
               page.text_content("#montagePrepareInfo"))
 
