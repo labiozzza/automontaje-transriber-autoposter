@@ -199,6 +199,8 @@ class MontageCleanupTests(unittest.TestCase):
 
         self.assertEqual(job["status"], "processing")
         self.assertEqual(job["phase"], "main_ready")
+        self.assertLess(job["progress"], 100)
+        self.assertEqual(job["progress"], app._MONTAGE_RENDER_PROGRESS_CAP)
         self.assertFalse((workdir / "normalized_source.mp4").exists())
         saved = json.loads((workdir / "job_state.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["status"], "processing")
@@ -237,6 +239,7 @@ class MontageCleanupTests(unittest.TestCase):
 
         self.assertEqual(job["status"], "processing")
         self.assertEqual(job["phase"], "main_ready")
+        self.assertLess(job["progress"], 100)
         self.assertIsNone(job["error"])
         self.assertIn("cleanup crashed", (workdir / "cleanup.log").read_text(encoding="utf-8"))
 

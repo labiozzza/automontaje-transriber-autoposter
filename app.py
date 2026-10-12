@@ -1981,6 +1981,39 @@ def _recover_publish_outcomes(job: dict) -> None:
     job["publish_progress"] = progress
 
 
+_MONTAGE_RENDER_PROGRESS_CAP = 90.0
+
+
+def _finalize_montage_state(job: dict) -> list:
+    """Set the terminal unified-pipeline state on *job* (synchronous).
+
+    A failure of an optional phase (mirrored variant or platform preparation)
+    never hides the already-produced main result: it becomes a warning and the
+    job still reaches ``done`` so the main video stays usable (spec 4).  The
+    overall progress only reaches 100% here (spec 4), never at ``main_ready``.
+    Shared by the async ``_finalize_montage`` and server-restart recovery.
+    """
+    params = job.get("params") or {}
+    warnings = []
+    if params.get("prepare_mirrored") and not mirror_variant_ready(job):
+        reason = str((job.get("mirror_variant") or {}).get("error") or "").strip()
+        warnings.append("Отражённая версия не подготовлена" + (f": {reason}" if reason else ""))
+    if params.get("prepare_publish", True) and job.get("prepare_status") != "done":
+        reason = str(job.get("prepare_error") or "").strip()
+        label = (
+            "Подготовка файлов к публикации завершилась с ошибкой"
+            if reason else "Подготовка файлов к публикации не завершена"
+        )
+        warnings.append(label + (f": {reason}" if reason else ""))
+    job["warnings"] = warnings
+    job["phase"] = "ready_with_warnings" if warnings else "ready"
+    job["status"] = "done"
+    job["progress"] = 100
+    job["stage"] = "done"
+    job["detail"] = "Готово с предупреждениями" if warnings else "Готово"
+    return warnings
+
+
 def _recover_montage_jobs() -> None:
     root = MONTAGE_WORK.resolve()
     workdirs = sorted(
@@ -2012,14 +2045,35 @@ def _recover_montage_jobs() -> None:
                     result_path = (job.get("result") or {}).get("result_video")
                     has_result = bool(result_path) and Path(str(result_path)).is_file()
                     if has_result:
-                        # The render finished; publication (if any) was interrupted.
-                        job["status"] = "done"
-                        job["stage"] = "done"
-                        job["detail"] = "Публикация прервана перезапуском сервера"
+                        # The main render finished.  The unified pipeline may have
+                        # been interrupted inside an optional phase (mirrored
+                        # variant / platform preparation).  Mark only the
+                        # interrupted sub-operation as failed, keep every ready
+                        # artefact, and let ``_finalize_montage_state`` decide
+                        # readiness with warnings -- never claim full readiness
+                        # while a requested phase is incomplete (task: recovery
+                        # must be phase-aware, not result-video-only).
+                        mirror_state = job.get("mirror_variant")
+                        if isinstance(mirror_state, dict) and mirror_state.get("status") == "generating":
+                            mirror_msg = "Подготовка отражённой версии прервана перезапуском сервера"
+                            mirror_state = dict(mirror_state)
+                            mirror_state.update(status="error", error=mirror_msg, detail=mirror_msg)
+                            mirror_state["operation"] = failed_snapshot(mirror_state.get("operation"), mirror_msg)
+                            job["mirror_variant"] = mirror_state
+                        if job.get("prepare_status") == "running":
+                            prep_msg = "Подготовка файлов к публикации прервана перезапуском сервера"
+                            job["prepare_status"] = "error"
+                            job["prepare_error"] = prep_msg
+                            prepare_op = job.get("prepare_operation")
+                            if isinstance(prepare_op, dict):
+                                job["prepare_operation"] = failed_snapshot(prepare_op, prep_msg)
                         operation = job.get("operation")
                         if isinstance(operation, dict) and operation.get("status") in {"running", "pending"}:
                             job["operation"] = failed_snapshot(operation, message)
                         _recover_publish_outcomes(job)
+                        _finalize_montage_state(job)
+                        if job.get("publish_status") or job.get("publish_errors") or job.get("publish_unknown"):
+                            job["detail"] = "Публикация прервана перезапуском сервера"
                         _run_cleanup_safely(_cleanup_render_artifacts, recovered_id, job)
                         if not job.get("publish_errors") and not job.get("publish_unknown"):
                             _run_cleanup_safely(_cleanup_publish_artifacts, recovered_id, job)
@@ -2167,22 +2221,7 @@ async def _finalize_montage(job_id: str) -> None:
         return
     if job.get("status") == "error":
         return
-    params = job.get("params") or {}
-    warnings = []
-    if params.get("prepare_mirrored") and not mirror_variant_ready(job):
-        reason = str((job.get("mirror_variant") or {}).get("error") or "").strip()
-        warnings.append("Отражённая версия не подготовлена" + (f": {reason}" if reason else ""))
-    if params.get("prepare_publish", True) and job.get("prepare_status") == "error":
-        reason = str(job.get("prepare_error") or "").strip()
-        warnings.append(
-            "Подготовка файлов к публикации завершилась с ошибкой" + (f": {reason}" if reason else "")
-        )
-    job["warnings"] = warnings
-    job["phase"] = "ready_with_warnings" if warnings else "ready"
-    job["status"] = "done"
-    job["progress"] = 100
-    job["stage"] = "done"
-    job["detail"] = "Готово с предупреждениями" if warnings else "Готово"
+    warnings = _finalize_montage_state(job)
     _save_montage_job(job_id)
     await broadcast_progress(job_id, 100, "done", job["detail"])
     if warnings:
@@ -2196,7 +2235,14 @@ async def process_montage(job_id: str, params: dict):
     loop = asyncio.get_running_loop()
     try:
         job["status"] = "processing"
-        progress = _threaded_progress(loop, job_id)
+        raw_progress = _threaded_progress(loop, job_id)
+
+        def progress(pct, stage, detail=""):
+            # Reserve headroom for the automatic phases that follow the main
+            # render (mirroring / platform preparation): the overall job only
+            # reaches 100% in ``_finalize_montage`` (spec 4).
+            capped = min(max(float(pct or 0), 0.0), _MONTAGE_RENDER_PROGRESS_CAP)
+            raw_progress(capped, stage, detail)
 
         await _montage_announce(job_id, "Проверка установленных компонентов...")
         status = montage_engine.montage_status()
@@ -2287,13 +2333,16 @@ async def process_montage(job_id: str, params: dict):
         # prematurely (spec section 4).  The main MP4 is already available.
         job["status"] = "processing"
         job["phase"] = "main_ready"
-        job["progress"] = 100
+        # The overall job must NOT reach 100% while the mirrored variant and the
+        # platform preparation still run; only ``_finalize_montage`` may do that
+        # (spec 4).  The internal main-render stage may still show 100%.
+        job["progress"] = _MONTAGE_RENDER_PROGRESS_CAP
         job["stage"] = "main_ready"
         job["detail"] = "Основной ролик готов"
         job["result"] = meta
         _save_montage_job(job_id)
         _run_cleanup_safely(_cleanup_render_artifacts, job_id, job)
-        await broadcast_progress(job_id, 100, "main_ready", "Основной ролик готов")
+        await broadcast_progress(job_id, _MONTAGE_RENDER_PROGRESS_CAP, "main_ready", "Основной ролик готов")
         await _montage_announce(job_id, f"Основной ролик готов: {Path(meta['result_video']).name} ({(os.path.getsize(meta['result_video']) >> 20)} МБ)")
     except Exception as e:
         job["status"] = "error"
@@ -2980,11 +3029,13 @@ async def start_montage(
             job["phase"] = "rendering_mirror"
             _save_montage_job(job_id)
             if not mirror_variant_ready(job):
+                await broadcast_progress(job_id, 93, "rendering_mirror", "Подготовка отражённой версии")
                 await process_mirror_variant(job_id)
         # ---- Phase C: platform-ready artefacts (automatic) ----
         if params.get("prepare_publish", True):
             job["phase"] = "preparing_platform_variants"
             _save_montage_job(job_id)
+            await broadcast_progress(job_id, 96, "preparing_platform_variants", "Подготовка файлов к публикации")
             try:
                 await process_prepare_publish(
                     job_id, _default_prepare_targets(job)
@@ -2995,6 +3046,7 @@ async def start_montage(
         # ---- Phase D: verify and finalize (no premature done) ----
         job["phase"] = "verifying_outputs"
         _save_montage_job(job_id)
+        await broadcast_progress(job_id, 98, "verifying_outputs", "Проверка результатов")
         await _finalize_montage(job_id)
 
     asyncio.create_task(_run_montage_then_variant())

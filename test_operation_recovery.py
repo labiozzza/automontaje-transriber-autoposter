@@ -175,6 +175,93 @@ class OperationRecoveryTest(unittest.TestCase):
         self.assertEqual(job["status"], "done")
         self.assertEqual(job["operation"]["status"], "completed")
 
+    def test_restart_at_main_ready_reports_warnings_not_full_readiness(self):
+        (self.workdir / "final.mp4").write_bytes(b"v")
+        self._write_state(
+            status="processing",
+            phase="main_ready",
+            stage="main_ready",
+            detail="Основной ролик готов",
+            params={"prepare_publish": True, "prepare_mirrored": True},
+            prepare_status="idle",
+            mirror_variant=None,
+            last_publish_targets=[],
+        )
+        app_module._recover_montage_jobs()
+        job = app_module.jobs.get(self.job_id)
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["phase"], "ready_with_warnings")
+        joined = " ".join(job["warnings"])
+        self.assertIn("Отражённая версия", joined)
+        self.assertIn("не завершена", joined)
+        self.assertEqual(job["progress"], 100)
+        self.assertNotIn((job.get("operation") or {}).get("status"), {"running", "pending"})
+
+    def test_restart_during_mirror_marks_variant_interrupted(self):
+        (self.workdir / "final.mp4").write_bytes(b"v")
+        self._write_state(
+            status="processing",
+            phase="rendering_mirror",
+            params={"prepare_publish": True, "prepare_mirrored": True},
+            prepare_status="idle",
+            mirror_variant={
+                "status": "generating",
+                "operation": {"status": "running", "progress": 30, "stages": []},
+            },
+            last_publish_targets=[],
+        )
+        app_module._recover_montage_jobs()
+        job = app_module.jobs.get(self.job_id)
+        self.assertEqual(job["mirror_variant"]["status"], "error")
+        self.assertIn("прерван", job["mirror_variant"]["error"].lower())
+        self.assertEqual(job["mirror_variant"]["operation"]["status"], "failed")
+        self.assertEqual(job["phase"], "ready_with_warnings")
+        self.assertEqual(job["status"], "done")
+
+    def test_restart_during_preparation_marks_prepare_interrupted(self):
+        (self.workdir / "final.mp4").write_bytes(b"v")
+        self._write_state(
+            status="processing",
+            phase="preparing_platform_variants",
+            params={"prepare_publish": True, "prepare_mirrored": False},
+            prepare_status="running",
+            prepare_operation={
+                "version": 4,
+                "status": "running",
+                "progress": 50,
+                "stages": [
+                    {"key": "video:instagram:main", "label": "Видео", "status": "running", "progress": 50},
+                ],
+            },
+            last_publish_targets=[],
+        )
+        app_module._recover_montage_jobs()
+        job = app_module.jobs.get(self.job_id)
+        self.assertEqual(job["prepare_status"], "error")
+        self.assertIn("прерван", job["prepare_error"].lower())
+        self.assertEqual(job["prepare_operation"]["status"], "failed")
+        self.assertEqual(job["phase"], "ready_with_warnings")
+        self.assertEqual(job["status"], "done")
+        running = [s for s in job["prepare_operation"]["stages"] if s["status"] == "running"]
+        self.assertEqual(running, [])
+
+    def test_restart_after_completed_preparation_is_clean(self):
+        (self.workdir / "final.mp4").write_bytes(b"v")
+        self._write_state(
+            status="processing",
+            phase="verifying_outputs",
+            params={"prepare_publish": True, "prepare_mirrored": False},
+            prepare_status="done",
+            mirror_variant=None,
+            last_publish_targets=[],
+        )
+        app_module._recover_montage_jobs()
+        job = app_module.jobs.get(self.job_id)
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["phase"], "ready")
+        self.assertEqual(job["warnings"], [])
+        self.assertEqual(job["progress"], 100)
+
 
 if __name__ == "__main__":
     unittest.main()
