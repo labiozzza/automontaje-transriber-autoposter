@@ -719,17 +719,6 @@ def render_montage(
                 "image_path": str(image_path),
                 "name": str(raw.get("name") or image_path.name),
             })
-        elif overlay_kind == "drawing":
-            drawing = raw.get("drawing")
-            if not isinstance(drawing, dict) or not isinstance(drawing.get("paths"), list):
-                raise RuntimeError("Данные рисунка повреждены")
-            overlay.update({
-                "kind": "drawing",
-                "name": str(raw.get("name") or f"Рисунок {index + 1}"),
-                "trigger_text": str(raw.get("trigger_text") or ""),
-                "draw_speed": max(10.0, min(50000.0, float(raw.get("draw_speed") or 350))),
-                "drawing": drawing,
-            })
         else:
             animation_id = str(raw.get("animation_id") or raw.get("id") or "")
             if Path(animation_id).name != animation_id or not (ANIMATIONS_DIR / animation_id / "manifest.json").exists():

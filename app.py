@@ -1009,92 +1009,7 @@ from montage.secrets_env import load_secrets_env
 load_secrets_env()
 from montage import engine as montage_engine
 from montage import cover_generator
-from montage import drawing_generator
 from montage.progress_tracker import failed_snapshot, ProgressTracker, Stage
-
-_drawing_generation_lock = asyncio.Lock()
-_drawing_generation_jobs: dict[str, dict[str, Any]] = {}
-
-_DRAWING_STAGE_SPECS = (
-    ("prepare", "Подготовка транскрипции"),
-    ("analyse", "Анализ текста"),
-    ("select", "Выбор смысловых моментов"),
-    ("request", "Запрос к BigPickle"),
-    ("response", "Получение ответа"),
-    ("parse", "Разбор ответа"),
-    ("validate", "Проверка координат"),
-    ("save", "Сохранение схем"),
-)
-
-
-def _drawing_stages() -> list[dict[str, Any]]:
-    return [
-        {"key": key, "label": label, "status": "pending", "progress": None, "detail": "", "error": ""}
-        for key, label in _DRAWING_STAGE_SPECS
-    ]
-
-
-def _drawing_stage_set(stages: list, key: str, status: str, detail: str = "", progress=None) -> list:
-    for stage in stages:
-        if stage.get("key") == key:
-            stage["status"] = status
-            if detail:
-                stage["detail"] = detail
-            stage["progress"] = progress
-            break
-    return stages
-
-
-
-def _save_drawing_job(job_id: str) -> None:
-    task = _drawing_generation_jobs.get(job_id)
-    if not task:
-        return
-    path = MONTAGE_WORK / job_id / "drawing_generation.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = dict(task)
-    data["updated_at"] = datetime.utcnow().isoformat()
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-from typing import Any, Optional
-...
-def _load_drawing_job(job_id: str) -> Optional[dict[str, Any]]:
-    path = MONTAGE_WORK / job_id / "drawing_generation.json"
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-
-def _recover_drawing_jobs() -> None:
-    """Восстанавливает задания генерации схем после перезапуска сервера."""
-    if not MONTAGE_WORK.is_dir():
-        return
-    for path in sorted(MONTAGE_WORK.glob("*/drawing_generation.json"))[-30:]:
-        try:
-            job = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(job, dict) or not job.get("id"):
-            continue
-        if job.get("status") == "running":
-            job["status"] = "error"
-            job["phase"] = "Ошибка генерации"
-            job["indeterminate"] = False
-            job["progress"] = min(int(job.get("progress") or 0), 95)
-            job["error"] = "Генерация была прервана перезапуском сервера"
-            stages = job.get("stages") or _drawing_stages()
-            for stage in stages:
-                if stage.get("status") in ("running", "pending"):
-                    stage["status"] = "error" if stage.get("status") == "running" else "skipped"
-            job["stages"] = stages
-            try:
-                path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception:
-                continue
-        _drawing_generation_jobs[str(job["id"])] = job
 
 
 def _uploaded_video(job_id: str) -> Optional[Path]:
@@ -1149,9 +1064,7 @@ def _recover_transcription_projects() -> None:
             output_json = OUTPUT_DIR / f"{job_id}.json"
             if not srt_text and output_srt.is_file():
                 srt_text = output_srt.read_text(encoding="utf-8", errors="replace")
-            if srt_text:
-                segments = drawing_generator.parse_srt_segments(srt_text)
-            elif output_json.is_file():
+            if output_json.is_file():
                 try:
                     value = json.loads(output_json.read_text(encoding="utf-8"))
                     if isinstance(value, list):
@@ -2191,7 +2104,6 @@ def _recover_montage_jobs() -> None:
 
 
 _recover_montage_jobs()
-_recover_drawing_jobs()
 _recover_transcription_projects()
 
 
@@ -2687,303 +2599,6 @@ async def download_comfortaa_font():
     return {"font": {"id": target.name, "name": "Comfortaa", "path": str(target)}}
 
 
-def _drawing_time(value: Any, fallback: float) -> float:
-    if value is None or str(value).strip() == "":
-        return float(fallback)
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return float(fallback)
-
-
-@app.post("/api/montage/drawings/generate")
-async def generate_montage_drawings(request: Request):
-    client_host = request.client.host if request.client else ""
-    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
-        raise HTTPException(403, "Генерация рисунков доступна только локально")
-    origin = request.headers.get("origin", "")
-    if origin and origin not in {
-        "http://127.0.0.1:8000", "http://localhost:8000",
-        "https://127.0.0.1:8000", "https://localhost:8000",
-    }:
-        raise HTTPException(403, "Недопустимый источник запроса")
-    if _drawing_generation_lock.locked():
-        raise HTTPException(409, "BigPickle уже создаёт рисунки")
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(400, "Некорректный JSON")
-    if not isinstance(payload, dict):
-        raise HTTPException(400, "Некорректный запрос")
-    transcript = str(payload.get("srt_text") or "")
-    requested_fragments = payload.get("selected_fragments")
-    mode = str(payload.get("mode") or "manual")
-    if mode not in ("manual", "auto"):
-        mode = "manual"
-    source_segments: list[dict[str, Any]] = []
-    transcript_job_id = str(payload.get("transcript_job_id") or "")
-    project_id = str(payload.get("project_id") or "")
-    if transcript_job_id:
-        source_job = jobs.get(transcript_job_id) or {}
-        if source_job.get("status") == "done" and isinstance(source_job.get("result"), list):
-            source_segments = source_job["result"]
-            transcript = montage_engine.build_words_srt(source_segments)
-    elif project_id:
-        async with PROJECTS_LOCK:
-            project = dict(PROJECTS.get(project_id) or {})
-        source_job = jobs.get(str(project.get("transcript_job_id") or "")) or {}
-        if source_job.get("status") == "done" and isinstance(source_job.get("result"), list):
-            source_segments = source_job["result"]
-            transcript = montage_engine.build_words_srt(source_segments)
-    if not transcript.strip():
-        raise HTTPException(400, "Сначала выберите транскрибацию или загрузите SRT")
-    if len(transcript) > 200_000:
-        raise HTTPException(400, "Транскрипция слишком большая")
-    duration_end = 0.0
-    for item in source_segments:
-        try:
-            duration_end = max(duration_end, float(item.get("end") or 0))
-        except (TypeError, ValueError):
-            pass
-    if mode == "manual":
-        if not isinstance(requested_fragments, list) or not requested_fragments:
-            raise HTTPException(400, "Добавьте хотя бы одно задание для схемы")
-        if len(requested_fragments) > 12:
-            raise HTTPException(400, "Можно подготовить не более 12 заданий для схем")
-    selected_fragments = []
-    if mode == "manual":
-        used_targets: set[str] = set()
-        for position, item in enumerate(requested_fragments):
-            if not isinstance(item, dict):
-                continue
-            try:
-                segment_index = int(item.get("segment_index"))
-            except (TypeError, ValueError):
-                segment_index = -1
-            if source_segments and segment_index != -1 and not 0 <= segment_index < len(source_segments):
-                raise HTTPException(400, "Выбран неизвестный фрагмент транскрипции")
-            if source_segments and 0 <= segment_index < len(source_segments):
-                segment = source_segments[segment_index]
-                target_id = str(segment_index)
-                base_start = float(segment.get("start") or 0)
-                base_end = float(segment.get("end") or base_start + 1)
-                base_text = str(segment.get("text") or "")
-            else:
-                target_id = str(item.get("target_id") or f"manual-{position}")
-                base_start = 0.0
-                base_end = 1.0
-                base_text = ""
-            text = str(item.get("text") if item.get("text") is not None else base_text).strip()[:500]
-            start = _drawing_time(item.get("start"), base_start)
-            end = _drawing_time(item.get("end"), base_end)
-            if target_id in used_targets:
-                continue
-            if not text:
-                raise HTTPException(400, "У каждого задания для схемы должен быть текст")
-            if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start + 0.049:
-                raise HTTPException(400, f"Некорректное время показа для «{text[:40]}»")
-            if duration_end and end > duration_end + 0.05:
-                raise HTTPException(400, f"Конец схемы «{text[:40]}» выходит за длительность ролика")
-            selected_fragments.append({
-                "target_id": target_id,
-                "start": round(start, 3),
-                "end": round(end, 3),
-                "text": text,
-            })
-            used_targets.add(target_id)
-    else:
-        selected_fragments = []
-    if mode == "manual" and not selected_fragments:
-        raise HTTPException(400, "Не осталось пригодных заданий для схем")
-    job_id = str(payload.get("job_id") or "").strip() or f"dj-{uuid.uuid4().hex[:12]}"
-    if not re.fullmatch(r"[\w-]{6,64}", job_id):
-        raise HTTPException(400, "Некорректный идентификатор задания")
-    job: dict[str, Any] = {
-        "id": job_id,
-        "mode": mode,
-        "status": "running",
-        "phase": "Анализ транскрипции",
-        "progress": 10,
-        "indeterminate": False,
-        "error": "",
-        "drawings": [],
-        "created_at": datetime.utcnow().isoformat(),
-        "created_at_epoch": time.time(),
-        "attempt": 0,
-        "attempts_total": 2,
-        "attempt_timeout_seconds": 600,
-        "last_event": "Задание создано",
-        "events": [],
-        "stages": _drawing_stages(),
-    }
-    _drawing_generation_jobs[job_id] = job
-    for old_id in [
-        key for key, value in _drawing_generation_jobs.items()
-        if value.get("status") in ("done", "error") and key != job_id
-    ][-10:]:
-        _drawing_generation_jobs.pop(old_id, None)
-    _save_drawing_job(job_id)
-
-    def _job_update(**fields: Any) -> None:
-        job.update(fields)
-        _save_drawing_job(job_id)
-
-    def _generation_progress(event: dict[str, Any]) -> None:
-        event_name = str(event.get("event") or "")
-        event_at = float(event.get("event_at") or time.time())
-        detail = str(event.get("detail") or "BigPickle работает")
-        history = list(job.get("events") or [])
-        history.append({"event": event_name, "at": event_at, "detail": detail})
-        stages = [dict(stage) for stage in (job.get("stages") or _drawing_stages())]
-        fields: dict[str, Any] = {
-            "phase": detail,
-            "last_event": detail,
-            "events": history[-20:],
-            "attempt": int(event.get("attempt") or 0),
-            "attempts_total": int(event.get("attempts_total") or job.get("attempts_total") or 2),
-            "attempt_timeout_seconds": float(
-                event.get("attempt_timeout_seconds") or job.get("attempt_timeout_seconds") or 600
-            ),
-            "indeterminate": False,
-        }
-        if event_name == "attempt_started":
-            fields["attempt_started_at"] = event_at
-            fields["progress"] = max(int(job.get("progress") or 10), 15)
-            _drawing_stage_set(stages, "prepare", "completed")
-            _drawing_stage_set(stages, "analyse", "running", detail)
-            _drawing_stage_set(stages, "select", "running")
-            _drawing_stage_set(stages, "request", "running")
-        elif event_name == "activity":
-            _drawing_stage_set(stages, "request", "running", detail)
-        elif event_name == "response_received":
-            fields["progress"] = 88
-            _drawing_stage_set(stages, "analyse", "completed")
-            _drawing_stage_set(stages, "select", "completed")
-            _drawing_stage_set(stages, "request", "completed")
-            _drawing_stage_set(stages, "response", "running", detail)
-        elif event_name == "response_parsed":
-            fields["progress"] = 94
-            _drawing_stage_set(stages, "response", "completed")
-            _drawing_stage_set(stages, "parse", "completed")
-            _drawing_stage_set(stages, "validate", "running")
-        elif event_name in ("attempt_idle_timeout", "attempt_hard_timeout", "attempt_failed", "attempt_invalid_json"):
-            _drawing_stage_set(stages, "request", "running", detail)
-        fields["stages"] = stages
-        _job_update(**fields)
-
-    try:
-        _drawing_stage_set(job["stages"], "prepare", "completed")
-        _drawing_stage_set(job["stages"], "analyse", "running", "Ожидание свободного слота BigPickle")
-        _job_update(
-            phase="Ожидание свободного слота BigPickle",
-            last_event="Задание ожидает запуска модели",
-            progress=10,
-            indeterminate=False,
-            stages=job["stages"],
-        )
-        if mode == "auto":
-            async with _drawing_generation_lock:
-                drawings = await asyncio.to_thread(
-                    drawing_generator.generate_smart_drawings,
-                    transcript,
-                    source_segments or [],
-                    3,
-                    _generation_progress,
-                )
-        else:
-            async with _drawing_generation_lock:
-                drawings = await asyncio.to_thread(
-                    drawing_generator.generate_drawings,
-                    transcript,
-                    selected_fragments,
-                    _generation_progress,
-                )
-        stages = [dict(stage) for stage in (job.get("stages") or _drawing_stages())]
-        _drawing_stage_set(stages, "analyse", "completed")
-        _drawing_stage_set(stages, "select", "completed")
-        _drawing_stage_set(stages, "request", "completed")
-        _drawing_stage_set(stages, "response", "completed")
-        _drawing_stage_set(stages, "parse", "completed")
-        _drawing_stage_set(stages, "validate", "running")
-        _job_update(phase="Проверка и сохранение схем", progress=90, indeterminate=False, stages=stages)
-        if not drawings:
-            _drawing_stage_set(stages, "validate", "completed")
-            _drawing_stage_set(stages, "save", "failed", "Схемы не найдены")
-            raise ValueError("BigPickle не предложил ни одной схемы")
-        job["drawings"] = drawings
-        _drawing_stage_set(stages, "validate", "completed")
-        _drawing_stage_set(stages, "save", "completed")
-        _job_update(status="done", phase="Готово", progress=100, drawings=drawings, stages=stages)
-    except Exception as exc:
-        failed_progress = min(int(job.get("progress") or 10), 95)
-        stages = [dict(stage) for stage in (job.get("stages") or _drawing_stages())]
-        for stage in stages:
-            if stage.get("status") == "running":
-                stage["status"] = "error"
-                stage["error"] = str(exc)
-            elif stage.get("status") == "pending":
-                stage["status"] = "skipped"
-        _job_update(
-            status="error", phase="Ошибка генерации", progress=failed_progress,
-            indeterminate=False, error=str(exc), stages=stages,
-        )
-        _drawing_generation_jobs.pop(job_id, None)
-        raise HTTPException(502, f"Не удалось получить рисунки от BigPickle: {exc}")
-    return {"drawings": drawings, "job_id": job_id}
-
-
-@app.get("/api/montage/drawings/status")
-async def montage_drawing_job_status(request: Request, job_id: str = ""):
-    client_host = request.client.host if request.client else ""
-    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
-        raise HTTPException(403, "Статус генерации доступен только локально")
-    job = _drawing_generation_jobs.get(job_id) or _load_drawing_job(job_id)
-    if not isinstance(job, dict):
-        raise HTTPException(404, "Задание генерации не найдено")
-    return job
-
-
-@app.post("/api/montage/drawings/revise")
-async def revise_montage_drawing(request: Request):
-    client_host = request.client.host if request.client else ""
-    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
-        raise HTTPException(403, "Изменение рисунков доступно только локально")
-    origin = request.headers.get("origin", "")
-    if origin and origin not in {
-        "http://127.0.0.1:8000", "http://localhost:8000",
-        "https://127.0.0.1:8000", "https://localhost:8000",
-    }:
-        raise HTTPException(403, "Недопустимый источник запроса")
-    if _drawing_generation_lock.locked():
-        raise HTTPException(409, "BigPickle уже обрабатывает рисунки")
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(400, "Некорректный JSON")
-    if not isinstance(payload, dict):
-        raise HTTPException(400, "Некорректный запрос")
-    instruction = str(payload.get("instruction") or "").strip()
-    if not instruction:
-        raise HTTPException(400, "Опишите, как изменить схему")
-    if len(instruction) > 2000:
-        raise HTTPException(400, "Инструкция слишком длинная")
-    overlay = payload.get("drawing")
-    if not isinstance(overlay, dict) or not isinstance(overlay.get("drawing"), dict):
-        raise HTTPException(400, "Нет данных схемы для изменения")
-    try:
-        async with _drawing_generation_lock:
-            revised = await asyncio.to_thread(
-                drawing_generator.revise_drawing,
-                overlay,
-                instruction,
-            )
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise HTTPException(502, f"BigPickle вернул некорректную схему: {exc}")
-    except Exception as exc:
-        raise HTTPException(502, f"Не удалось изменить схему: {exc}")
-    return {"drawing": revised}
-
-
 @app.post("/api/montage/render")
 async def start_montage(
     video: Optional[UploadFile] = File(None),
@@ -3000,7 +2615,6 @@ async def start_montage(
     subtitle_font: Optional[str] = Form(None),
     face_tracking: bool = Form(False),
     autozoom: bool = Form(False),
-    mirror_horizontal: bool = Form(False),
     blur_banned_words: bool = Form(False),
     subtitles: bool = Form(True),
     bigpickle: bool = Form(True),
@@ -3157,18 +2771,6 @@ async def start_montage(
                     "image_path": str(saved_overlay_paths[file_index].resolve()),
                     "name": Path(upload.filename or f"Наложение {index + 1}").name[:120],
                 })
-            elif overlay_kind == "drawing":
-                try:
-                    validated = drawing_generator.validate_drawing_overlay(raw, index)
-                except (TypeError, ValueError, OverflowError) as exc:
-                    raise HTTPException(400, f"Рисунок {index + 1} некорректен: {exc}")
-                overlay.update({
-                    "kind": "drawing",
-                    "name": validated["name"],
-                    "trigger_text": validated["trigger_text"],
-                    "draw_speed": validated["draw_speed"],
-                    "drawing": validated["drawing"],
-                })
             else:
                 overlay_animation_id = str(raw.get("animation_id") or "")
                 if Path(overlay_animation_id).name != overlay_animation_id or not (
@@ -3223,7 +2825,7 @@ async def start_montage(
         "subtitle_font": subtitle_font,
         "face_tracking": face_tracking,
         "autozoom": autozoom,
-        "mirror_horizontal": mirror_horizontal,
+        "mirror_horizontal": False,
         "blur_banned_words": blur_banned_words,
         "subtitles": subtitles,
         "bigpickle": bigpickle,

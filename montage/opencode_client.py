@@ -260,7 +260,7 @@ def _run_attempt(
     attempt: int,
     on_activity: Callable[[int], None],
 ) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="montage-drawing-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="montage-opencode-") as temporary:
         Path(temporary, "opencode.json").write_text(json.dumps({
             "$schema": "https://opencode.ai/config.json",
             "permission": "deny",
@@ -373,7 +373,7 @@ def ask_json(
     if len(prompt) > 60_000:
         raise OpenCodeError("Запрос к GPT слишком большой")
     executable = os.environ.get("OPENCODE_BIN") or "opencode"
-    selected_model = model or os.environ.get("DRAWING_MODEL") or "opencode/big-pickle"
+    selected_model = model or os.environ.get("MONTAGE_MODEL") or "opencode/big-pickle"
     allowed_env = {
         key: value for key, value in os.environ.items()
         if key in {
@@ -445,7 +445,7 @@ def ask_json(
             parsed = _json_object(result["text"])
             if parsed is None:
                 raise InvalidJSONError("BigPickle вернул некорректный JSON")
-            report("response_parsed", attempt, "Ответ разобран, проверяем и сохраняем схемы")
+            report("response_parsed", attempt, "Ответ разобран, проверяем и сохраняем результат")
             return parsed
         except _AttemptTimeout as exc:
             last_error = _error_for(exc.reason, exc.detail)

@@ -160,14 +160,14 @@ def main():
               page.text_content("#montageErrorBox"))
         check("interrupt start re-enabled", page.locator("#montageStartBtn").is_enabled())
 
-        # 8. concurrent operations (montage + drawings)
+        # 8. concurrent operations (montage + publish)
         inject(page, {
             "operation": {"status": "running", "progress": 20, "label": "Монтаж видео", "stages": []},
-            "drawings": {"status": "running", "progress": None, "detail": "Генерация схем"},
+            "publish_progress": {"ig": {"label": "Instagram", "progress": None, "status": "publishing", "detail": "Загрузка"}},
         })
         body = page.text_content("#operationsBody")
         check("concurrent montage shown", "Монтаж видео" in body)
-        check("concurrent drawings shown", "Схемы" in body)
+        check("concurrent publish shown", "Instagram" in body)
 
         # 9. switching operations preserves montage snapshot
         page.evaluate("""() => { window.__opsState = {operation: {status:'running', progress:55, label:'Монтаж видео', version:5, stages:[]}}; }""")

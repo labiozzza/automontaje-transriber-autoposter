@@ -5,8 +5,6 @@ Covers, without any real render/publish:
 * 9.3/9.5 — the mirrored version is prepared by the montage pipeline and reused
   by publish (never rendered inline), with stale-signature detection;
 * 10 — per-platform publish steps are recorded;
-* 8.2 — drawing generation exposes 8 explicit stages and never shows 100% on
-  error;
 * 8/9 — the result serializer exposes the mirror state.
 
 Run:
@@ -255,85 +253,6 @@ class PublishStepTests(Part2Base):
             self.assertEqual(steps["upload"]["status"], "completed")
             self.assertEqual(steps["auth"]["label"], "Проверка авторизации")
         asyncio.run(scenario())
-
-
-class DrawingStageTests(Part2Base):
-    def setUp(self):
-        super().setUp()
-        app_module._drawing_generation_jobs.clear()
-
-    async def _generate(self, request):
-        app_module._drawing_generation_lock = asyncio.Lock()
-        return await app_module.generate_montage_drawings(request)
-
-    def _request(self):
-        payload = {"job_id": "dj-part2", "mode": "auto", "srt_text": "1\n00:00:00,000 --> 00:00:01,000\nПривет мир\n"}
-
-        class FakeRequest:
-            headers = {}
-            client = type("C", (), {"host": "127.0.0.1"})()
-
-            async def json(self):
-                return payload
-
-        return FakeRequest()
-
-    def test_drawing_success_marks_all_stages_done(self):
-        def fake_generate(transcript, segments, count, progress_cb):
-            progress_cb({"event": "attempt_started", "attempt": 1, "attempts_total": 2, "detail": "Запрос"})
-            progress_cb({"event": "response_received", "attempt": 1, "detail": "Ответ получен"})
-            progress_cb({"event": "response_parsed", "attempt": 1, "detail": "Разбор"})
-            return [{"id": "d1", "points": [[0, 0], [1, 1]]}]
-
-        with mock.patch.object(app_module.drawing_generator, "generate_smart_drawings", side_effect=fake_generate), \
-                mock.patch.dict(app_module._drawing_generation_jobs, {}, clear=True):
-            request = self._request()
-            result = asyncio.run(self._generate(request))
-            job = app_module._drawing_generation_jobs[result["job_id"]]
-            stages = {s["key"]: s for s in job["stages"]}
-            self.assertEqual(job["status"], "done")
-            self.assertTrue(all(s["status"] == "completed" for s in stages.values()))
-            self.assertEqual(job["progress"], 100)
-
-    def test_drawing_error_never_reports_full_progress(self):
-        from fastapi import HTTPException
-
-        def fake_generate(transcript, segments, count, progress_cb):
-            progress_cb({"event": "attempt_started", "attempt": 1, "attempts_total": 2, "detail": "Запрос"})
-            progress_cb({"event": "response_received", "attempt": 1, "detail": "Ответ"})
-            raise RuntimeError("no schemas")
-
-        with mock.patch.object(app_module.drawing_generator, "generate_smart_drawings", side_effect=fake_generate), \
-                mock.patch.dict(app_module._drawing_generation_jobs, {}, clear=True):
-            request = self._request()
-            with self.assertRaises(HTTPException):
-                asyncio.run(self._generate(request))
-            # job is removed from the live registry on error; read the persisted snapshot
-            persisted = app_module._load_drawing_job("dj-part2")
-            self.assertIsNotNone(persisted)
-            self.assertLessEqual(persisted["progress"], 95)
-            running = [s for s in persisted["stages"] if s["status"] == "error"]
-            self.assertTrue(running)
-
-    def test_drawing_recovery_marks_running_stage_error_and_caps_progress(self):
-        workdir = app_module.MONTAGE_WORK / "dj-recover"
-        workdir.mkdir(parents=True)
-        state = {
-            "id": "dj-recover", "status": "running", "phase": "x", "progress": 88,
-            "stages": [
-                {"key": "prepare", "label": "Подготовка", "status": "completed", "progress": None, "detail": "", "error": ""},
-                {"key": "request", "label": "Запрос", "status": "running", "progress": None, "detail": "", "error": ""},
-            ],
-        }
-        (workdir / "drawing_generation.json").write_text(json.dumps(state), encoding="utf-8")
-        with mock.patch.dict(app_module._drawing_generation_jobs, {}, clear=True):
-            app_module._recover_drawing_jobs()
-            job = app_module._drawing_generation_jobs["dj-recover"]
-            self.assertEqual(job["status"], "error")
-            self.assertLessEqual(job["progress"], 95)
-            stages = {s["key"]: s for s in job["stages"]}
-            self.assertEqual(stages["prepare"]["status"], "completed")
-            self.assertEqual(stages["request"]["status"], "error")
 
 
 if __name__ == "__main__":

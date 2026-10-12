@@ -2,7 +2,7 @@
 
 One place builds a *plan* of stages with weights, measures each stage when a
 real metric exists and keeps the aggregate honest otherwise.  Every operation
-(montage, drawings, covers, publish) reports the same normalised snapshot so
+(montage, covers, publish) reports the same normalised snapshot so
 the UI can render a single collapsible component.
 
 Design rules (see task spec section 4/7):
